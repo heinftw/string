@@ -40,18 +40,18 @@ QLabel {{
 }}
 #titleLabel {{
     color: #ffffff;
-    font-size: 20px;
+    font-size: 15px;
     font-weight: 700;
 }}
 #subtitleLabel {{
     color: {TEXT_DIM};
-    font-size: 11px;
+    font-size: 8px;
     font-weight: 600;
     letter-spacing: 3px;
 }}
 #rowLabel {{
     color: {TEXT_DIM};
-    font-size: 11px;
+    font-size: 9px;
     font-weight: 700;
     letter-spacing: 2px;
     padding-right: 2px;
@@ -69,10 +69,10 @@ QLabel {{
     background: transparent;
     border: none;
     border-radius: 6px;
-    min-width: 40px;
-    max-width: 40px;
-    min-height: 30px;
-    max-height: 30px;
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 24px;
+    max-height: 24px;
 }}
 #titleBtn:hover {{
     background: #1c2430;
@@ -85,14 +85,14 @@ QLineEdit, QComboBox {{
     border: 1px solid {FIELD_BORDER};
     border-radius: 8px;
     color: {TEXT};
-    padding: 10px 12px;
-    font-size: 13px;
+    padding: 6px 8px;
+    font-size: 12px;
     selection-background-color: {ACCENT};
     selection-color: #ffffff;
 }}
 QLineEdit:focus, QComboBox:focus {{
     border: 2px solid {FIELD_BORDER_FOCUS};
-    padding: 9px 11px;
+    padding: 5px 7px;
 }}
 QLineEdit::placeholder {{
     color: {TEXT_MUTED};
@@ -120,10 +120,10 @@ QComboBox QAbstractItemView {{
 }}
 QCheckBox {{
     color: {TEXT_DIM};
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 700;
     letter-spacing: 2px;
-    spacing: 8px;
+    spacing: 6px;
 }}
 QCheckBox::indicator {{
     width: 18px;
@@ -148,10 +148,10 @@ QPushButton {{
     border: 1px solid {FIELD_BORDER};
     border-radius: 8px;
     color: {TEXT};
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: 2px;
-    padding: 14px 20px;
+    letter-spacing: 1px;
+    padding: 8px 12px;
 }}
 QPushButton:hover {{
     border: 1px solid {ACCENT_SOFT};
@@ -177,15 +177,15 @@ QPushButton:disabled {{
 #refreshBtn {{
     background: transparent;
     color: {ACCENT_SOFT};
-    padding: 10px 16px;
-    letter-spacing: 2px;
+    padding: 6px 10px;
+    letter-spacing: 1px;
 }}
 #refreshBtn:hover {{
     border: 1px solid {ACCENT_SOFT};
 }}
 #progressPct {{
     color: {ACCENT_SOFT};
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 700;
     background: transparent;
 }}
@@ -202,7 +202,7 @@ QProgressBar::chunk {{
 }}
 #verifyHeader {{
     color: #ffffff;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     letter-spacing: 2px;
     background: transparent;
@@ -223,27 +223,27 @@ QProgressBar::chunk {{
     background: #070b10;
     border: 1px solid #161c24;
     border-radius: 8px;
-    padding: 8px;
+    padding: 6px;
     color: {TEXT};
     font-family: 'Consolas', 'Cascadia Mono', 'Courier New', monospace;
-    font-size: 10pt;
+    font-size: 9pt;
 }}
 #footerLabel {{
     color: {TEXT_DIM};
-    font-size: 11px;
+    font-size: 9px;
     font-weight: 700;
     letter-spacing: 2px;
     background: transparent;
 }}
 #footerValueOk {{
     color: {GREEN};
-    font-size: 11px;
+    font-size: 9px;
     font-weight: 700;
     letter-spacing: 2px;
 }}
 #footerValueBad {{
     color: {RED};
-    font-size: 11px;
+    font-size: 9px;
     font-weight: 700;
     letter-spacing: 2px;
 }}

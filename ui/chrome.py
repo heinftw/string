@@ -24,16 +24,16 @@ class TitleBar(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName("titleBar")
-        self.setFixedHeight(64)
+        self.setFixedHeight(44)
         self._drag_offset: Optional[QPoint] = None
 
         root = QHBoxLayout(self)
-        root.setContentsMargins(14, 6, 10, 6)
-        root.setSpacing(10)
+        root.setContentsMargins(10, 4, 8, 4)
+        root.setSpacing(6)
 
         self.logo = QLabel()
-        self.logo.setPixmap(icons.chip_logo(46).pixmap(46, 46))
-        self.logo.setFixedSize(46, 46)
+        self.logo.setPixmap(icons.chip_logo(30).pixmap(30, 30))
+        self.logo.setFixedSize(30, 30)
         root.addWidget(self.logo)
 
         self.title = QLabel("string-wiper")
@@ -48,23 +48,23 @@ class TitleBar(QWidget):
         self.btn_min = QToolButton()
         self.btn_min.setObjectName("titleBtn")
         self.btn_min.setIcon(icons.minimize())
-        self.btn_min.setIconSize(QSize(28, 28))
+        self.btn_min.setIconSize(QSize(20, 20))
         self.btn_min.clicked.connect(self.request_minimize.emit)
 
         self.btn_max = QToolButton()
         self.btn_max.setObjectName("titleBtn")
         self.btn_max.setIcon(icons.maximize())
-        self.btn_max.setIconSize(QSize(28, 28))
+        self.btn_max.setIconSize(QSize(20, 20))
         self.btn_max.clicked.connect(self.request_maximize.emit)
 
         self.btn_close = QToolButton()
         self.btn_close.setObjectName("titleBtnClose")
         self.btn_close.setIcon(icons.close_x())
-        self.btn_close.setIconSize(QSize(28, 28))
+        self.btn_close.setIconSize(QSize(20, 20))
         self.btn_close.clicked.connect(self.request_close.emit)
 
         for button in (self.btn_min, self.btn_max, self.btn_close):
-            button.setFixedSize(40, 30)
+            button.setFixedSize(34, 24)
             root.addWidget(button)
 
     # -------------------------------------------------------------- drag/move

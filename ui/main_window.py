@@ -42,7 +42,7 @@ from ui.workers import CleanupWorker, MemoryWorker
 
 _MAX_ACTION_PREVIEW = 30
 _LOG_MAX_BLOCKS = 20000
-_LABEL_WIDTH = 132
+_LABEL_WIDTH = 96
 
 _TAG_COLORS = {
     "info": theme.GREEN,
@@ -69,8 +69,8 @@ def _card_row(label_text: str, *widgets: QWidget) -> QFrame:
     card = QFrame()
     card.setObjectName("card")
     row = QHBoxLayout(card)
-    row.setContentsMargins(18, 12, 18, 12)
-    row.setSpacing(12)
+    row.setContentsMargins(12, 8, 12, 8)
+    row.setSpacing(8)
     row.addWidget(_row_label(label_text))
     for widget in widgets:
         row.addWidget(widget, 1)
@@ -83,9 +83,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("string-wiper")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setMinimumSize(860, 720)
-        self.resize(1180, 1060)
-        self.setWindowIcon(icons.chip_logo(46))
+        self.setWindowIcon(icons.chip_logo(30))
+        self._fit_screen()
 
         self._processes: List[ProcessInfo] = []
         self._thread: Optional[QThread] = None
@@ -98,6 +97,24 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._startup_checks()
         self.refresh_processes()
+
+    def _fit_screen(self) -> None:
+        """Size the window as a compact desktop panel, never filling the screen.
+
+        The default 860x700 (min 600x520) is clamped to 80%/85% of the
+        available work area, so DPI-scaled or small displays still show the
+        desktop around the app and every control stays visible.
+        """
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            self.setMinimumSize(600, 520)
+            self.resize(860, 700)
+            return
+        avail = screen.availableGeometry()
+        self.resize(min(860, int(avail.width() * 0.80)),
+                    min(700, int(avail.height() * 0.85)))
+        self.setMinimumSize(min(600, int(avail.width() * 0.50)),
+                            min(520, int(avail.height() * 0.55)))
 
     # ------------------------------------------------------------------ UI
 
@@ -117,8 +134,8 @@ class MainWindow(QMainWindow):
 
         content = QWidget()
         root = QVBoxLayout(content)
-        root.setContentsMargins(18, 6, 18, 10)
-        root.setSpacing(10)
+        root.setContentsMargins(12, 4, 12, 8)
+        root.setSpacing(7)
         outer.addWidget(content, 1)
 
         # banner (hidden unless the process is not elevated)
@@ -126,7 +143,7 @@ class MainWindow(QMainWindow):
         self.banner.setObjectName("bannerCard")
         self.banner.setWordWrap(True)
         self.banner.setTextFormat(Qt.TextFormat.RichText)
-        self.banner.setContentsMargins(14, 10, 14, 10)
+        self.banner.setContentsMargins(10, 8, 10, 8)
         self.banner.setVisible(False)
         root.addWidget(self.banner)
 
@@ -139,11 +156,11 @@ class MainWindow(QMainWindow):
 
         # PROCESS
         self.process_combo = QComboBox()
-        self.process_combo.setMinimumWidth(320)
+        self.process_combo.setMinimumWidth(220)
         self.refresh_btn = QPushButton("REFRESH")
         self.refresh_btn.setObjectName("refreshBtn")
         self.refresh_btn.setIcon(icons.refresh())
-        self.refresh_btn.setIconSize(QSize(16, 16))
+        self.refresh_btn.setIconSize(QSize(14, 14))
         self.refresh_btn.clicked.connect(self.refresh_processes)
         self.process_combo.currentIndexChanged.connect(self._on_selection_changed)
         proc_row = QWidget()
@@ -180,7 +197,7 @@ class MainWindow(QMainWindow):
         options_row = QWidget()
         options_layout = QHBoxLayout(options_row)
         options_layout.setContentsMargins(0, 0, 0, 0)
-        options_layout.setSpacing(36)
+        options_layout.setSpacing(24)
         options_layout.addWidget(self.chk_utf8)
         options_layout.addWidget(self.chk_mapped)
         options_layout.addWidget(self.chk_restart)
@@ -193,15 +210,15 @@ class MainWindow(QMainWindow):
         self.clean_btn = QPushButton("CLEAN MEMORY")
         self.clean_btn.setObjectName("cleanBtn")
         self.clean_btn.setIcon(icons.broom())
-        self.clean_btn.setIconSize(QSize(20, 20))
-        self.clean_btn.setMinimumHeight(52)
+        self.clean_btn.setIconSize(QSize(16, 16))
+        self.clean_btn.setMinimumHeight(40)
         self.clean_btn.setDefault(True)
         self.clean_btn.clicked.connect(self._on_clean_clicked)
         buttons.addWidget(self.clean_btn, 4)
         self.persist_btn = QPushButton("CLEAN PERSISTENCE...")
         self.persist_btn.setIcon(icons.database())
-        self.persist_btn.setIconSize(QSize(20, 20))
-        self.persist_btn.setMinimumHeight(52)
+        self.persist_btn.setIconSize(QSize(16, 16))
+        self.persist_btn.setMinimumHeight(40)
         self.persist_btn.setToolTip(
             "ShellBags, TypedPaths, RunMRU, RecentDocs, ComDlg32 MRUs, "
             "WordWheelQuery, Recent Items and jump lists: identify keyword-matching "
@@ -211,8 +228,8 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self.persist_btn, 4)
         self.cancel_btn = QPushButton("CANCEL")
         self.cancel_btn.setIcon(icons.x_circle())
-        self.cancel_btn.setIconSize(QSize(20, 20))
-        self.cancel_btn.setMinimumHeight(52)
+        self.cancel_btn.setIconSize(QSize(16, 16))
+        self.cancel_btn.setMinimumHeight(40)
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._on_cancel_clicked)
         buttons.addWidget(self.cancel_btn, 3)
@@ -226,12 +243,12 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFixedHeight(4)
         self.progress_pct = QLabel("0%")
         self.progress_pct.setObjectName("progressPct")
-        self.progress_pct.setFixedWidth(48)
+        self.progress_pct.setFixedWidth(42)
         self.progress_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         prog_row = QWidget()
         prog_layout = QHBoxLayout(prog_row)
-        prog_layout.setContentsMargins(0, 4, 0, 4)
-        prog_layout.setSpacing(12)
+        prog_layout.setContentsMargins(0, 2, 0, 2)
+        prog_layout.setSpacing(8)
         prog_layout.addWidget(self.progress_bar, 1)
         prog_layout.addWidget(self.progress_pct)
         root.addWidget(_card_row("PROGRESS", prog_row))
@@ -240,13 +257,13 @@ class MainWindow(QMainWindow):
         verify = QFrame()
         verify.setObjectName("card")
         verify_layout = QVBoxLayout(verify)
-        verify_layout.setContentsMargins(18, 12, 18, 14)
-        verify_layout.setSpacing(10)
+        verify_layout.setContentsMargins(12, 8, 12, 10)
+        verify_layout.setSpacing(6)
         verify_header = QHBoxLayout()
-        verify_header.setSpacing(8)
+        verify_header.setSpacing(6)
         shield_label = QLabel()
-        shield_label.setPixmap(icons.shield().pixmap(18, 18))
-        shield_label.setFixedSize(18, 18)
+        shield_label.setPixmap(icons.shield().pixmap(14, 14))
+        shield_label.setFixedSize(14, 14)
         verify_header.addWidget(shield_label)
         self.summary_label = QLabel("VERIFICATION (NO RUN YET)")
         self.summary_label.setObjectName("verifyHeader")
@@ -256,7 +273,7 @@ class MainWindow(QMainWindow):
         self.clear_log_btn = QPushButton("CLEAR LOG")
         self.clear_log_btn.setObjectName("clearLogBtn")
         self.clear_log_btn.setIcon(icons.trash())
-        self.clear_log_btn.setIconSize(QSize(14, 14))
+        self.clear_log_btn.setIconSize(QSize(12, 12))
         self.clear_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_log_btn.clicked.connect(self._on_clear_log)
         verify_header.addWidget(self.clear_log_btn)
@@ -276,14 +293,14 @@ class MainWindow(QMainWindow):
         outer.addWidget(rule)
         footer = QWidget()
         footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(18, 8, 18, 10)
-        footer_layout.setSpacing(8)
+        footer_layout.setContentsMargins(12, 5, 12, 7)
+        footer_layout.setSpacing(6)
 
         mode_wrap = QHBoxLayout()
         mode_wrap.setSpacing(6)
         self.footer_mode_icon = QLabel()
-        self.footer_mode_icon.setPixmap(icons.shield(theme.ACCENT_SOFT, 16).pixmap(16, 16))
-        self.footer_mode_icon.setFixedSize(16, 16)
+        self.footer_mode_icon.setPixmap(icons.shield(theme.ACCENT_SOFT, 13).pixmap(13, 13))
+        self.footer_mode_icon.setFixedSize(13, 13)
         self.footer_mode = QLabel("SAFE MODE")
         self.footer_mode.setObjectName("footerLabel")
         mode_wrap.addWidget(self.footer_mode_icon)
@@ -294,8 +311,8 @@ class MainWindow(QMainWindow):
         arch_wrap = QHBoxLayout()
         arch_wrap.setSpacing(6)
         self.footer_arch_icon = QLabel()
-        self.footer_arch_icon.setPixmap(icons.memory_chip(theme.TEXT_DIM, 16).pixmap(16, 16))
-        self.footer_arch_icon.setFixedSize(16, 16)
+        self.footer_arch_icon.setPixmap(icons.memory_chip(theme.TEXT_DIM, 13).pixmap(13, 13))
+        self.footer_arch_icon.setFixedSize(13, 13)
         self.footer_arch = QLabel("X64 ARCHITECTURE")
         self.footer_arch.setObjectName("footerLabel")
         arch_wrap.addWidget(self.footer_arch_icon)
@@ -306,8 +323,8 @@ class MainWindow(QMainWindow):
         access_wrap = QHBoxLayout()
         access_wrap.setSpacing(6)
         self.footer_access_icon = QLabel()
-        self.footer_access_icon.setPixmap(icons.memory_chip(theme.GREEN, 16).pixmap(16, 16))
-        self.footer_access_icon.setFixedSize(16, 16)
+        self.footer_access_icon.setPixmap(icons.memory_chip(theme.GREEN, 13).pixmap(13, 13))
+        self.footer_access_icon.setFixedSize(13, 13)
         self.footer_access_prefix = QLabel("MEMORY ACCESS:")
         self.footer_access_prefix.setObjectName("footerLabel")
         self.footer_access = QLabel("ENABLED")
@@ -331,17 +348,14 @@ class MainWindow(QMainWindow):
     def _update_footer_mode(self, checked: bool) -> None:
         if checked:
             self.footer_mode.setText("DANGER MODE")
-            self.footer_mode.setStyleSheet(f"color: {theme.RED}; font-size: 11px; font-weight: 700; letter-spacing: 2px;")
-            self.footer_mode_icon.setPixmap(icons.shield(theme.RED, 16).pixmap(16, 16))
+            self.footer_mode.setStyleSheet(f"color: {theme.RED}; font-size: 9px; font-weight: 700; letter-spacing: 1px;")
+            self.footer_mode_icon.setPixmap(icons.shield(theme.RED, 13).pixmap(13, 13))
         else:
             self.footer_mode.setText("SAFE MODE")
             self.footer_mode.setStyleSheet("")
-            self.footer_mode_icon.setPixmap(icons.shield(theme.ACCENT_SOFT, 16).pixmap(16, 16))
+            self.footer_mode_icon.setPixmap(icons.shield(theme.ACCENT_SOFT, 13).pixmap(13, 13))
 
     # ---------------------------------------------- frameless window handling
-
-    def _toggle_maximize_slot(self) -> None:  # pragma: no cover - alias kept simple
-        self._toggle_maximize()
 
     def nativeEvent(self, event_type, message):  # noqa: N802 - Qt API
         """WM_NCHITTEST: edge resize + caption drag outside interactive widgets."""
