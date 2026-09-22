@@ -13,11 +13,12 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from . import winapi
-from .matching import Pattern, find_matches, resolve_string_bounds
+from .matching import ScanPlan, resolve_string_bounds
 
-SCAN_CHUNK_SIZE = 1 << 20  # 1 MiB owned bytes per read
+SCAN_CHUNK_SIZE = 4 << 20  # 4 MiB owned bytes per read
 INITIAL_CONTEXT = 4096  # first boundary-context window around a hit
 MAX_STRING_PAD = 1 << 20  # cap for boundary expansion (limits wipe-span size)
+PAGE_FALLBACK_SIZE = 0x1000  # minimum piece when a window read fails
 
 # Base-protection classes (modifiers such as PAGE_GUARD masked out).
 _READABLE = {
@@ -126,11 +127,14 @@ def open_target_process(pid: int) -> int:
     )
     handle = winapi.OpenProcess(access, False, pid)
     if not handle:
-        raise OSError(
-            winapi.win_error_message(f"OpenProcess(PID {pid})")
-            + " If this is access denied: run the tool as Administrator; some "
-            "protected processes (antivirus, system) still refuse VM access."
-        )
+        code = winapi.get_last_error()
+        message = winapi.win_error_message(f"OpenProcess(PID {pid})")
+        if code == winapi.ERROR_ACCESS_DENIED:
+            message += (
+                " Run the tool as Administrator (elevated); some protected processes "
+                "(antivirus, system) still refuse VM access."
+            )
+        raise OSError(message)
     return handle
 
 
@@ -182,6 +186,56 @@ def write_bytes(handle: int, address: int, data: bytes) -> bool:
     return bool(ok and written.value == len(data))
 
 
+@dataclass
+class ReadStats:
+    """Tally of unreadable pages seen during a best-effort read sweep."""
+
+    unreadable_bytes: int = 0
+    unreadable_spans: int = 0
+
+    def record(self, size: int) -> None:
+        self.unreadable_bytes += size
+        self.unreadable_spans += 1
+
+
+def read_best_effort(handle: int, address: int, size: int, stats: Optional[ReadStats] = None) -> bytes:
+    """Read [address, address+size) zero-filling unreadable pages.
+
+    The whole window is tried first (fast path); on failure the window is
+    binary-split down to 4 KiB pages so ONE unreadable page never blanks out
+    the rest of a region.  Unreadable pages become zero bytes in the result,
+    which are hard string boundaries for the pure matching logic - exactly the
+    right semantics (the bytes there are not visible to us, so a printable run
+    cannot be proven to cross them).
+    """
+    if size <= 0:
+        return b""
+    buf = bytearray(size)
+    _read_fill(handle, address, size, buf, 0, stats)
+    return bytes(buf)
+
+
+def _read_fill(
+    handle: int,
+    address: int,
+    size: int,
+    out: bytearray,
+    out_off: int,
+    stats: Optional[ReadStats],
+) -> None:
+    data = read_bytes(handle, address, size)
+    if data is not None and len(data) == size:
+        out[out_off : out_off + size] = data
+        return
+    if size <= PAGE_FALLBACK_SIZE:
+        if stats is not None:
+            stats.record(size)
+        return
+    half = size >> 1
+    _read_fill(handle, address, half, out, out_off, stats)
+    _read_fill(handle, address + half, size - half, out, out_off + half, stats)
+
+
 def virtual_protect(handle: int, address: int, size: int, new_protect: int) -> Tuple[bool, int]:
     """VirtualProtectEx; returns (ok, previous_protect)."""
     old = winapi.DWORD(0)
@@ -216,6 +270,11 @@ def enum_regions(
     the target).
     """
     log = on_log or (lambda _m: None)
+    policy = (
+        "MEM_PRIVATE + MEM_MAPPED + MEM_IMAGE (DANGER)"
+        if include_mapped_image
+        else "MEM_PRIVATE (heaps) only"
+    )
     regions: List[RegionInfo] = []
     skipped_guard = 0
     skipped_noaccess = 0
@@ -247,10 +306,9 @@ def enum_regions(
                 skipped_noaccess += 1
         addr = next_addr
     log(
-        f"[regions] {len(regions)} scannable region(s); skipped "
-        f"{skipped_type} region(s) by type policy (use the checkbox to include "
-        f"MEM_MAPPED/MEM_IMAGE), {skipped_guard} PAGE_GUARD, {skipped_noaccess} "
-        f"PAGE_NOACCESS, non-committed states excluded."
+        f"[regions] {len(regions)} scannable region(s) [{policy}]; skipped "
+        f"{skipped_type} region(s) by type policy, {skipped_guard} PAGE_GUARD, "
+        f"{skipped_noaccess} PAGE_NOACCESS; non-committed states excluded."
     )
     return regions
 
@@ -258,75 +316,78 @@ def enum_regions(
 def scan_region(
     handle: int,
     region: RegionInfo,
-    patterns: Sequence[Pattern],
-    overlap: int,
-    on_log: Optional[Callable[[str], None]] = None,
+    plan: ScanPlan,
     cancel: Optional[object] = None,
-) -> Tuple[List[Hit], bool]:
-    """Chunked scan of one region.  Returns (hits, cancelled).
+) -> Tuple[List[Hit], bool, "ReadStats"]:
+    """Chunked scan of one region.  Returns (hits, cancelled, read stats).
 
-    Chunks overlap by ``overlap`` bytes so a pattern spanning a chunk
+    Chunks overlap by ``plan.max_size`` bytes so a pattern spanning a chunk
     boundary is fully visible in one window; matches are credited only to the
-    chunk that owns their start offset.
+    chunk that owns their start offset.  Reads are best-effort: unreadable
+    pages are zero-filled and counted, never aborting the rest of the region.
     """
-    log = on_log or (lambda _m: None)
+    stats = ReadStats()
     hits: List[Hit] = []
+    overlap = plan.max_size
     pos = region.base
     while pos < region.end:
         if cancel is not None and cancel.is_set():
-            return hits, True
+            return hits, True, stats
         want = min(SCAN_CHUNK_SIZE + overlap, region.end - pos)
-        data = read_bytes(handle, pos, want)
-        if data is None:
-            log(
-                f"[scan] {region.describe()}: ReadProcessMemory failed at "
-                f"0x{pos:X}: {winapi.win_error_message('ReadProcessMemory')} "
-                "- skipping the rest of this region."
-            )
-            break
-        if not data:
-            break
-        owned_end = pos + min(SCAN_CHUNK_SIZE, len(data))
-        for m in find_matches(data, patterns):
+        data = read_best_effort(handle, pos, want, stats)
+        owned = min(SCAN_CHUNK_SIZE, want)
+        owned_end = pos + owned
+        for m in plan.find(data):
             abs_start = pos + m.start
             if abs_start >= owned_end:
                 continue  # credited to the next chunk
-            hits.append(
-                Hit(abs_start, m.end - m.start, m.keyword, m.encoding, region)
-            )
-        # Advance by the owned size; a full-length read keeps ``overlap`` bytes
-        # in scope for the next chunk, a short read is the region's tail.
-        advance = SCAN_CHUNK_SIZE if len(data) >= SCAN_CHUNK_SIZE else max(len(data), 1)
-        pos += advance
-    return hits, False
+            hits.append(Hit(abs_start, m.end - m.start, m.keyword, m.encoding, region))
+        pos += owned
+    return hits, False, stats
 
 
 def scan_regions(
     handle: int,
     regions: Sequence[RegionInfo],
-    patterns: Sequence[Pattern],
+    plan: ScanPlan,
     on_log: Optional[Callable[[str], None]] = None,
     on_progress: Optional[Callable[[int, int], None]] = None,
     cancel: Optional[object] = None,
 ) -> Tuple[List[Hit], bool]:
-    """Scan every region; logs per-region hit counts.  Returns (hits, cancelled)."""
+    """Scan every region; logs per-region hit counts.  Returns (hits, cancelled).
+
+    Unreadable-page counts are aggregated into one line per region (instead of
+    per-page spam) and progress is coalesced to ~0.5% steps to keep the UI
+    responsive on huge address spaces.
+    """
     log = on_log or (lambda _m: None)
     progress = on_progress or (lambda _d, _t: None)
     total = sum(r.size for r in regions)
     done = 0
+    last_reported = 0
     all_hits: List[Hit] = []
-    overlap = max((p.max_size for p in patterns), default=1)
     for region in regions:
         if cancel is not None and cancel.is_set():
             return all_hits, True
-        hits, cancelled = scan_region(handle, region, patterns, overlap, log, cancel)
+        hits, cancelled, stats = scan_region(handle, region, plan, cancel)
         if hits:
             log(f"[scan] {region.describe()}: {len(hits)} hit(s)")
             all_hits.extend(hits)
+        if stats.unreadable_spans:
+            log(
+                f"[scan] {region.describe()}: {stats.unreadable_spans} unreadable "
+                f"span(s)/page(s) ({stats.unreadable_bytes} byte(s)) zero-filled and "
+                "treated as string boundaries (freed, COW-hardened or access-denied "
+                "pages even an elevated reader cannot read)."
+            )
         done += region.size
-        progress(min(done, total), total)
+        if total and (done - last_reported) * 200 >= total:
+            progress(min(done, total), total)
+            last_reported = done
         if cancelled:
             return all_hits, True
+    if total:
+        progress(total, total)
     return all_hits, False
 
 
@@ -343,10 +404,7 @@ def remote_string_span(
     while True:
         buf_lo = max(region.base, hit.address - pad)
         buf_hi = min(region.end, hit.address + hit.size + pad)
-        data = read_bytes(handle, buf_lo, buf_hi - buf_lo)
-        if not data:
-            return hit.address, hit.address + hit.size
-        buf_hi = buf_lo + len(data)
+        data = read_best_effort(handle, buf_lo, buf_hi - buf_lo)
         rel_s = hit.address - buf_lo
         rel_e = rel_s + hit.size
         lo, hi = resolve_string_bounds(data, rel_s, rel_e, hit.encoding)
@@ -362,12 +420,15 @@ __all__ = [
     "SCAN_CHUNK_SIZE",
     "INITIAL_CONTEXT",
     "MAX_STRING_PAD",
+    "PAGE_FALLBACK_SIZE",
     "RegionInfo",
     "Hit",
+    "ReadStats",
     "open_target_process",
     "process_alive",
     "virtual_query",
     "read_bytes",
+    "read_best_effort",
     "write_bytes",
     "virtual_protect",
     "enum_regions",

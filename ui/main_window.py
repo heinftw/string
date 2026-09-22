@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -40,7 +39,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("string-wiper - live memory string scrubber")
-        self.resize(900, 720)
+        self.resize(620, 540)
+        self.setMinimumSize(540, 430)
 
         self._processes: List[ProcessInfo] = []
         self._thread: Optional[QThread] = None
@@ -60,68 +60,76 @@ class MainWindow(QMainWindow):
         central = QWidget(self)
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
 
         self.banner = QLabel()
         self.banner.setWordWrap(True)
         self.banner.setStyleSheet(
-            "background-color:#fff3cd; border:1px solid #d4a017; padding:6px;"
+            "background-color:#fff3cd; border:1px solid #d4a017; padding:3px;"
         )
         self.banner.setVisible(False)
         root.addWidget(self.banner)
 
-        targets = QGroupBox("Target")
-        form = QFormLayout(targets)
+        top = QFormLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setHorizontalSpacing(6)
+        top.setVerticalSpacing(3)
 
         self.keywords_edit = QLineEdit()
         self.keywords_edit.setPlaceholderText(
             'comma-separated keywords, e.g.  madium, secret project'
         )
-        form.addRow("Keywords:", self.keywords_edit)
+        top.addRow("Keywords:", self.keywords_edit)
 
         picker_row = QHBoxLayout()
+        picker_row.setSpacing(4)
         self.process_combo = QComboBox()
-        self.process_combo.setMinimumWidth(420)
+        self.process_combo.setMinimumWidth(280)
         picker_row.addWidget(self.process_combo, 1)
         self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setFixedWidth(64)
         self.refresh_btn.clicked.connect(self.refresh_processes)
         picker_row.addWidget(self.refresh_btn)
-        form.addRow("Process:", picker_row)
+        top.addRow("Process:", picker_row)
 
         self.arch_label = QLabel("")
         self.arch_label.setWordWrap(True)
-        form.addRow("Status:", self.arch_label)
+        self.arch_label.setStyleSheet("color:#444; font-size:11px;")
+        top.addRow("Status:", self.arch_label)
         self.process_combo.currentIndexChanged.connect(self._on_selection_changed)
+        root.addLayout(top)
 
-        root.addWidget(targets)
-
-        options = QGroupBox("Options")
-        opt_layout = QVBoxLayout(options)
-        self.chk_mapped = QCheckBox(
-            "Include MEM_MAPPED / MEM_IMAGE regions (DANGER: overwriting mapped "
-            "files, constants or code can crash the target process)"
-        )
-        opt_layout.addWidget(self.chk_mapped)
-        self.chk_utf8 = QCheckBox("Also match UTF-8 (multi-byte) encodings")
+        opts = QHBoxLayout()
+        opts.setSpacing(10)
+        self.chk_utf8 = QCheckBox("UTF-8 too")
         self.chk_utf8.setChecked(True)
-        opt_layout.addWidget(self.chk_utf8)
-        self.chk_restart = QCheckBox(
-            "Restart target process after cleaning (taskkill /f /im + relaunch). "
+        self.chk_utf8.setToolTip("Also match UTF-8 (multi-byte) encodings.")
+        opts.addWidget(self.chk_utf8)
+        self.chk_mapped = QCheckBox("MEM_MAPPED/MEM_IMAGE")
+        self.chk_mapped.setToolTip(
+            "DANGER: also scan MEM_MAPPED and MEM_IMAGE regions. Overwriting "
+            "mapped files, constants or code can crash the target process."
+        )
+        self.chk_mapped.setStyleSheet("color:#a33;")
+        opts.addWidget(self.chk_mapped)
+        self.chk_restart = QCheckBox("Restart after clean")
+        self.chk_restart.setToolTip(
+            "Restart the target process after cleaning (taskkill /f /im + relaunch). "
             "A freshly started process can only reload from the already-cleaned "
             "registry/disk sources, so wiped strings cannot reappear."
         )
-        self.chk_restart.setToolTip(
-            "taskkill /f /im <name> followed by relaunch. For explorer.exe this starts "
-            "a fresh shell which rebuilds its strings from the cleaned sources."
-        )
-        opt_layout.addWidget(self.chk_restart)
-        root.addWidget(options)
+        opts.addWidget(self.chk_restart)
+        opts.addStretch(1)
+        root.addLayout(opts)
 
         buttons = QHBoxLayout()
+        buttons.setSpacing(4)
         self.clean_btn = QPushButton("Clean memory")
         self.clean_btn.setDefault(True)
         self.clean_btn.clicked.connect(self._on_clean_clicked)
         buttons.addWidget(self.clean_btn)
-        self.persist_btn = QPushButton("Clean persistence sources...")
+        self.persist_btn = QPushButton("Clean persistence...")
         self.persist_btn.setToolTip(
             "ShellBags (BagMRU/Bags), TypedPaths, RunMRU, Recent Items and jump "
             "lists: identify keyword-matching entries, then delete only those "
@@ -138,16 +146,20 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(14)
         root.addWidget(self.progress_bar)
 
         self.summary_label = QLabel("Verification: (no run yet)")
-        self.summary_label.setStyleSheet("font-weight: bold;")
+        self.summary_label.setStyleSheet("font-weight: bold; font-size:11px;")
         root.addWidget(self.summary_label)
 
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(50000)
         self.log_view.setPlaceholderText("live log...")
+        self.log_view.setStyleSheet(
+            "font-family: Consolas, 'Courier New', monospace; font-size:9px;"
+        )
         root.addWidget(self.log_view, 1)
 
     # ------------------------------------------------------- startup checks

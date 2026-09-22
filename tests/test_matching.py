@@ -15,6 +15,7 @@ from core.matching import (
     ENCODING_UTF8,
     PROCESS_HACKER_MIN_STRING_LENGTH,
     build_patterns,
+    build_scan_plan,
     find_matches,
     merge_spans,
     parse_keywords,
@@ -205,6 +206,72 @@ class BoundaryAndMergeTests(unittest.TestCase):
         hits = _hits(data, ["madium"])
         lo, hi = resolve_string_bounds(data, hits[0].start, hits[0].end, hits[0].encoding)
         self.assertEqual(data[lo:hi], sentence)
+
+
+class ScanPlanTests(unittest.TestCase):
+    """The fused per-encoding scanner must agree with find_matches where the
+    per-keyword scanner is authoritative, and never create false hits around
+    zero-filled unreadable pages (scanner gap semantics)."""
+
+    @staticmethod
+    def _keyed(matches):
+        return [(m.keyword, m.start, m.end, m.encoding) for m in matches]
+
+    def test_equivalent_to_find_matches_on_disjoint_keywords(self):
+        data = (
+            b"\x00i bought madium\x00"
+            + "top secret project".encode("utf-16le")
+            + b"\x00\x00"
+            + b"madium again\x00"
+        )
+        plan = build_scan_plan(["madium", "secret project"])
+        pset = build_patterns(["madium", "secret project"])
+        self.assertEqual(self._keyed(plan.find(data)), self._keyed(find_matches(data, pset.patterns)))
+
+    def test_equivalent_to_find_matches_with_overlapping_keywords(self):
+        data = b"\x00madium\x00"
+        plan = build_scan_plan(["mad", "madium"])
+        pset = build_patterns(["mad", "madium"])
+        self.assertEqual(self._keyed(plan.find(data)), self._keyed(find_matches(data, pset.patterns)))
+        self.assertEqual({h.keyword for h in plan.find(data)}, {"mad", "madium"})
+
+    def test_merged_span_same_for_overlapping_keywords(self):
+        data = b"\x00xx madium yy\x00"
+        plan = build_scan_plan(["mad", "ium", "madium"])
+        spans = merge_spans(
+            resolve_string_bounds(data, h.start, h.end, h.encoding) for h in plan.find(data)
+        )
+        self.assertEqual(spans, [(1, 13)])
+
+    def test_mixed_encodings_in_one_plan(self):
+        data = b"\x00madium\x00" + "madium".encode("utf-16le") + b"\x00\x00"
+        plan = build_scan_plan(["madium"])
+        hits = plan.find(data)
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(
+            {h.encoding for h in hits}, {ENCODING_ANSI, ENCODING_UTF16LE}
+        )
+
+    def test_zero_filled_gap_is_a_boundary_not_a_bridge(self):
+        # Two runs separated by an unreadable (zero-filled) gap must yield two
+        # separate wipe spans, and no false hit may be stitched across the gap.
+        run1 = b"aaa madium bbb"
+        run2 = b"ccc madium ddd"
+        data = b"\x00" + run1 + b"\x00" + b"\x00" * 16 + run2 + b"\x00"
+        plan = build_scan_plan(["madium"])
+        hits = plan.find(data)
+        self.assertEqual(len(hits), 2)
+        spans = merge_spans(
+            resolve_string_bounds(data, h.start, h.end, h.encoding) for h in hits
+        )
+        self.assertEqual([data[s:e] for s, e in spans], [run1, run2])
+
+    def test_zero_gap_does_not_synthesize_wide_hits(self):
+        # alternating letters and zeros must NOT match a UTF-16LE pattern
+        # across a zero gap (group positions must hold real letters).
+        data = b"\x00m\x00a\x00" + b"\x00" * 8 + b"d\x00i\x00u\x00m\x00"
+        plan = build_scan_plan(["madium"])
+        self.assertEqual(plan.find(data), [])
 
 
 class HelperTests(unittest.TestCase):

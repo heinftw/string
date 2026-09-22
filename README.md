@@ -22,12 +22,16 @@ those strings after a process restart or reboot.
 4. **Dual-encoding matching** — each keyword becomes case-insensitive byte
    patterns for ANSI (single-byte) and UTF-16LE (both byte alignments: matching
    is a plain byte search, so even and odd unit grids are both hit), optionally
-   UTF-8; reads are 1 MiB chunks with pattern-sized overlap so hits never split
-   across chunk boundaries.
+   UTF-8; ASCII patterns are searched at C speed on a case-folded buffer copy
+   (10x+ faster than per-keyword regex scans), reads are 4 MiB chunks with
+   pattern-sized overlap so hits never split across chunk boundaries, and a
+   failed read degrades to page granularity - one unreadable page never skips
+   the rest of a region.
 5. **Boundary resolution** — every hit is grown to its full printable run
    (narrow: bytes 0x20-0x7E and 0x80-0xFF; wide: printable units on the
    string's own unit grid, stopping at the NUL / double-NUL terminator) so the
-   entire containing string ("i bought madium yesterday") dies with its keyword.
+   entire containing string ("i bought madium yesterday") dies with its keyword;
+   unreadable pages are zero-filled and therefore act as hard boundaries.
 6. **In-place null overwrite** — read-only pages get a temporary
    `VirtualProtectEx` lift; `WriteProcessMemory` writes exactly the span length
    with 0x00 bytes (never free/resize/reallocate, so heap metadata and adjacent
@@ -94,6 +98,12 @@ restarting `explorer.exe` or rebooting to confirm permanence.
   5-pass rescan loop catches re-creations during the run; if matches persist
   after the cap, the app logs which memory regions keep regenerating. Do the
   persistence cleanup and restart the process (or reboot) to stop the source.
+- **Pages even an elevated reader cannot read.** Some committed pages refuse
+  `ReadProcessMemory` from another process (Windows 11 COW-hardened image
+  pages, transition pages of freed memory, certain instrumentation areas).
+  The tool retries at page granularity and scans everything readable; the
+  unreadable pages themselves cannot be verified or wiped and are logged as
+  zero-filled boundaries per region.
 - **Copies in other processes' memory.** Only the selected process is scrubbed.
   Clipboard holders, search indexers, antivirus, other apps that copied the
   string keep their own copies. *Remediation:* find them with Process Hacker
@@ -136,7 +146,7 @@ restarting `explorer.exe` or rebooting to confirm permanence.
   direction from the keyword; longer runs are cut at that limit (logged as the
   span boundaries). Wiping follows the printable-run rule exactly, so
   structural bytes (counters, pointers, terminators) around the run are never
-  touched.
+  touched. Unreadable pages break a run at the gap.
 - **Writes can crash the target.** In-place nulling of live heap strings is
   destructive by design; a program that dereferences its own wiped strings can
   misbehave or crash (much more likely with the `MEM_MAPPED`/`MEM_IMAGE`

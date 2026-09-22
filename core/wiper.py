@@ -14,8 +14,8 @@ from typing import Callable, List, Optional, Sequence
 
 from . import scanner, winapi
 from .matching import (
-    PatternSet,
-    build_patterns,
+    ScanPlan,
+    build_scan_plan,
     merge_spans,
 )
 
@@ -137,7 +137,7 @@ def _hexspan(start: int, end: int) -> str:
 def _scrub_one_pid(
     handle: int,
     pid: int,
-    pattern_set: PatternSet,
+    plan: ScanPlan,
     include_mapped_image: bool,
     log: LogFn,
     progress: ProgressFn,
@@ -158,7 +158,7 @@ def _scrub_one_pid(
 
         log(f"[pass {pass_no}] PID {pid}: scanning...")
         regions = scanner.enum_regions(handle, include_mapped_image, log)
-        hits, cancelled = scanner.scan_regions(handle, regions, pattern_set.patterns, log, progress, cancel)
+        hits, cancelled = scanner.scan_regions(handle, regions, plan, log, progress, cancel)
         if cancelled:
             summary.cancelled = True
             log(f"[pass {pass_no}] PID {pid}: cancelled between regions.")
@@ -209,7 +209,7 @@ def _scrub_one_pid(
         return
     log(f"[verify] PID {pid}: verification re-scan...")
     regions = scanner.enum_regions(handle, include_mapped_image, log)
-    v_hits, cancelled = scanner.scan_regions(handle, regions, pattern_set.patterns, log, progress, cancel)
+    v_hits, cancelled = scanner.scan_regions(handle, regions, plan, log, progress, cancel)
     if cancelled:
         summary.cancelled = True
         return
@@ -250,11 +250,11 @@ def scrub_processes(
     log = on_log or (lambda _m: None)
     progress = on_progress or (lambda _d, _t: None)
     summary = ScrubSummary(pids=list(pids))
-    pattern_set = build_patterns(keywords, include_utf8=include_utf8)
-    if not pattern_set.patterns:
+    plan = build_scan_plan(keywords, include_utf8=include_utf8)
+    if not plan.patterns:
         log("[error] no usable byte patterns for the given keywords - nothing to do.")
         return summary
-    for note in pattern_set.notes:
+    for note in plan.notes:
         log(f"[note] {note}")
     if include_mapped_image:
         log(
@@ -278,7 +278,7 @@ def scrub_processes(
             _scrub_one_pid(
                 handle,
                 pid,
-                pattern_set,
+                plan,
                 include_mapped_image,
                 log,
                 progress,

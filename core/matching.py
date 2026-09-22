@@ -276,3 +276,101 @@ def string_contains_any(text: str, keywords: Sequence[str]) -> Optional[str]:
         if kw.casefold() in folded:
             return kw
     return None
+
+
+# ---------------------------------------------------------------------------
+# Fast scanning: folded literal find for ASCII patterns + fused regex for the rest
+# ---------------------------------------------------------------------------
+
+_GROUP_PREFIX = "_g"
+
+
+@dataclass(frozen=True)
+class _FastNeedle:
+    """ASCII ANSI/UTF-16LE needle searched on a case-folded buffer copy."""
+
+    keyword: str
+    encoding: str
+    needle: bytes  # keyword.lower() encoded; bytes.lower() folds ASCII only
+    size: int
+
+
+@dataclass(frozen=True)
+class _Combined:
+    encoding: str
+    regex: "re.Pattern[bytes]"
+    alts: Tuple[Pattern, ...]  # pattern for group i is alts[i]
+
+
+@dataclass(frozen=True)
+class ScanPlan:
+    """Scanner for live-memory buffers, built for speed AND completeness.
+
+    * Pure-ASCII ANSI and UTF-16LE patterns become literal needles found with
+      ``bytes.find`` on a ``data.lower()`` copy.  ``bytes.lower`` folds exactly
+      ASCII A-Z - the same case set the per-character [aA] pattern classes
+      cover - so this is an exact, much faster substitute (C-level memchr vs
+      regex backtracking), scanning every byte alignment.
+    * Everything else (non-ASCII keywords, optional UTF-8) is fused into one
+      alternation regex per encoding with named groups so the winning keyword
+      is recovered from ``lastindex``.
+
+    ``find()`` semantics match ``find_matches``: duplicate
+    (keyword, start, end) hits are reported once and results are sorted.
+    """
+
+    patterns: Tuple[Pattern, ...]
+    notes: Tuple[str, ...]
+    combined: Tuple[_Combined, ...]
+    fast: Tuple[_FastNeedle, ...]
+    max_size: int
+
+    def find(self, data: bytes) -> List[Match]:
+        out: List[Match] = []
+        seen = set()
+        if self.fast:
+            folded = data.lower()
+            for f in self.fast:
+                start = folded.find(f.needle)
+                while start != -1:
+                    key = (f.keyword, start, start + f.size)
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(Match(f.keyword, start, start + f.size, f.encoding))
+                    start = folded.find(f.needle, start + f.size)
+        for combo in self.combined:
+            for m in combo.regex.finditer(data):
+                gi = m.lastindex
+                if not gi:
+                    continue
+                p = combo.alts[gi - 1]
+                key = (p.keyword, m.start(), m.end())
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(Match(p.keyword, m.start(), m.end(), p.encoding))
+        out.sort(key=lambda m: (m.start, m.end, m.keyword))
+        return out
+
+
+def build_scan_plan(keywords: Sequence[str], include_utf8: bool = True) -> ScanPlan:
+    """Build a ScanPlan from keywords (patterns + notes via ``build_patterns``)."""
+    pset = build_patterns(keywords, include_utf8=include_utf8)
+    fast: List[_FastNeedle] = []
+    by_encoding: dict = {}
+    for p in pset.patterns:
+        if p.keyword.isascii() and p.encoding in (ENCODING_ANSI, ENCODING_UTF16LE):
+            codec = _ANSI_CODEC if p.encoding == ENCODING_ANSI else ENCODING_UTF16LE
+            needle = p.keyword.lower().encode(codec)
+            fast.append(_FastNeedle(p.keyword, p.encoding, needle, len(needle)))
+        else:
+            by_encoding.setdefault(p.encoding, []).append(p)
+    combined: List[_Combined] = []
+    for encoding, pats in by_encoding.items():
+        pats.sort(key=lambda p: (-p.max_size, p.keyword))
+        frags = [
+            b"(?P<" + (_GROUP_PREFIX + str(i)).encode("ascii") + b">" + p.regex.pattern + b")"
+            for i, p in enumerate(pats)
+        ]
+        combined.append(_Combined(encoding, re.compile(b"|".join(frags)), tuple(pats)))
+    return ScanPlan(pset.patterns, pset.notes, tuple(combined), tuple(fast), pset.max_size)
