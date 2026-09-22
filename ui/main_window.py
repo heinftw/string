@@ -37,7 +37,7 @@ from core.persistence import PendingAction
 from core.processes import ProcessInfo, enumerate_processes, get_process_path, pids_for_name
 from core.wiper import ScrubSummary
 from ui import icons, theme
-from ui.chrome import TitleBar
+from ui.chrome import TitleBar, WindowDragMixin
 from ui.workers import CleanupWorker, MemoryWorker
 
 _MAX_ACTION_PREVIEW = 30
@@ -59,6 +59,7 @@ def _row_label(text: str) -> QLabel:
         f"{text} <span style='color:{theme.ACCENT}'>»</span>"
     )
     label.setObjectName("rowLabel")
+    label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
     label.setTextFormat(Qt.TextFormat.RichText)
     label.setFixedWidth(_LABEL_WIDTH)
     label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -77,7 +78,7 @@ def _card_row(label_text: str, *widgets: QWidget) -> QFrame:
     return card
 
 
-class MainWindow(QMainWindow):
+class MainWindow(WindowDragMixin, QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("string-wiper")
@@ -141,6 +142,7 @@ class MainWindow(QMainWindow):
         # banner (hidden unless the process is not elevated)
         self.banner = QLabel()
         self.banner.setObjectName("bannerCard")
+        self.banner.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.banner.setWordWrap(True)
         self.banner.setTextFormat(Qt.TextFormat.RichText)
         self.banner.setContentsMargins(10, 8, 10, 8)
@@ -173,6 +175,7 @@ class MainWindow(QMainWindow):
 
         # STATUS
         self.arch_label = QLabel("")
+        self.arch_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.arch_label.setTextFormat(Qt.TextFormat.RichText)
         self.arch_label.setWordWrap(True)
         root.addWidget(_card_row("STATUS", self.arch_label))
@@ -243,6 +246,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFixedHeight(4)
         self.progress_pct = QLabel("0%")
         self.progress_pct.setObjectName("progressPct")
+        self.progress_pct.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.progress_pct.setFixedWidth(42)
         self.progress_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         prog_row = QWidget()
@@ -262,11 +266,13 @@ class MainWindow(QMainWindow):
         verify_header = QHBoxLayout()
         verify_header.setSpacing(6)
         shield_label = QLabel()
+        shield_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         shield_label.setPixmap(icons.shield().pixmap(14, 14))
         shield_label.setFixedSize(14, 14)
         verify_header.addWidget(shield_label)
         self.summary_label = QLabel("VERIFICATION (NO RUN YET)")
         self.summary_label.setObjectName("verifyHeader")
+        self.summary_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.summary_label.setTextFormat(Qt.TextFormat.RichText)
         verify_header.addWidget(self.summary_label)
         verify_header.addStretch(1)
@@ -299,9 +305,11 @@ class MainWindow(QMainWindow):
         mode_wrap = QHBoxLayout()
         mode_wrap.setSpacing(6)
         self.footer_mode_icon = QLabel()
+        self.footer_mode_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.footer_mode_icon.setPixmap(icons.shield(theme.ACCENT_SOFT, 13).pixmap(13, 13))
         self.footer_mode_icon.setFixedSize(13, 13)
         self.footer_mode = QLabel("SAFE MODE")
+        self.footer_mode.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.footer_mode.setObjectName("footerLabel")
         mode_wrap.addWidget(self.footer_mode_icon)
         mode_wrap.addWidget(self.footer_mode)
@@ -311,9 +319,11 @@ class MainWindow(QMainWindow):
         arch_wrap = QHBoxLayout()
         arch_wrap.setSpacing(6)
         self.footer_arch_icon = QLabel()
+        self.footer_arch_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.footer_arch_icon.setPixmap(icons.memory_chip(theme.TEXT_DIM, 13).pixmap(13, 13))
         self.footer_arch_icon.setFixedSize(13, 13)
         self.footer_arch = QLabel("X64 ARCHITECTURE")
+        self.footer_arch.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.footer_arch.setObjectName("footerLabel")
         arch_wrap.addWidget(self.footer_arch_icon)
         arch_wrap.addWidget(self.footer_arch)
@@ -323,11 +333,14 @@ class MainWindow(QMainWindow):
         access_wrap = QHBoxLayout()
         access_wrap.setSpacing(6)
         self.footer_access_icon = QLabel()
+        self.footer_access_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.footer_access_icon.setPixmap(icons.memory_chip(theme.GREEN, 13).pixmap(13, 13))
         self.footer_access_icon.setFixedSize(13, 13)
         self.footer_access_prefix = QLabel("MEMORY ACCESS:")
+        self.footer_access_prefix.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.footer_access_prefix.setObjectName("footerLabel")
         self.footer_access = QLabel("ENABLED")
+        self.footer_access.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.footer_access.setObjectName("footerValueOk")
         access_wrap.addWidget(self.footer_access_icon)
         access_wrap.addWidget(self.footer_access_prefix)
@@ -576,6 +589,9 @@ class MainWindow(QMainWindow):
             "This will overwrite bytes IN PLACE inside the target process memory "
             "(null bytes, exact same length; no free/resize). Heap data containing "
             "the keywords becomes unrecoverable in that process.\n\n"
+            "Only the selected process is modified - other applications are NOT "
+            "touched. Wiping keyword strings from explorer.exe does not harm the "
+            "app those strings belong to; it keeps running normally.\n\n"
             f"Keywords: {', '.join(keywords)}\n"
             f"Target:   {info.name}  PIDs: {pids}\n"
             f"{' | '.join(option_bits)}"
