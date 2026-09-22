@@ -2,7 +2,8 @@
 
 Everything win32-related lives here: constants/flags, structure definitions,
 function bindings and error-message mapping.  Other modules import these
-symbols and never redefine them.
+symbols and never redefine them.  Functions come from kernel32, user32
+(window enumeration/text) and advapi32 (tokens/privileges).
 
 Structure notes (layout is asserted at import time on Windows):
 
@@ -222,9 +223,11 @@ class TOKEN_ELEVATION(Structure):
 
 if IS_WINDOWS:
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
 else:  # pragma: no cover - exercised only off-Windows
     _kernel32 = None
+    _user32 = None
     _advapi32 = None
 
 
@@ -330,31 +333,31 @@ QueryFullProcessImageNameW = _bind(
     [HANDLE, DWORD, ctypes.c_wchar_p, LPDWORD],
 )
 EnumWindows = _bind(
-    _kernel32,
+    _user32,
     "EnumWindows",
     BOOL,
     [WNDENUMPROC, LPARAM],
 )
 IsWindowVisible = _bind(
-    _kernel32,
+    _user32,
     "IsWindowVisible",
     BOOL,
     [HANDLE],
 )
 GetWindowTextLengthW = _bind(
-    _kernel32,
+    _user32,
     "GetWindowTextLengthW",
     c_int,
     [HANDLE],
 )
 GetWindowTextW = _bind(
-    _kernel32,
+    _user32,
     "GetWindowTextW",
     c_int,
     [HANDLE, LPVOID, c_int],
 )
 GetWindowThreadProcessId = _bind(
-    _kernel32,
+    _user32,
     "GetWindowThreadProcessId",
     DWORD,
     [HANDLE, LPDWORD],
