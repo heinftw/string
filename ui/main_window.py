@@ -1,18 +1,24 @@
-"""PySide6 main window: keyword box, process picker, Clean / persistence flows,
-live log, progress bar, verification summary, cancel control.
+"""PySide6 main window: mockup-matched dark UI over the string-wiper engine.
+
+Layout (top to bottom): custom title bar, KEYWORDS / PROCESS / STATUS / OPTIONS
+rows as cards, action buttons, PROGRESS row, VERIFICATION card (colored live
+log), footer status strip.  The window is frameless with native-style move via
+the title bar and edge resize via WM_NCHITTEST on Windows.
 """
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QThread, Slot
+from PySide6.QtCore import QPoint, QSize, Qt, QThread, Slot
+from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -30,17 +36,56 @@ from core.matching import parse_keywords, short_keyword_notes
 from core.persistence import PendingAction
 from core.processes import ProcessInfo, enumerate_processes, get_process_path, pids_for_name
 from core.wiper import ScrubSummary
+from ui import icons, theme
+from ui.chrome import TitleBar
 from ui.workers import CleanupWorker, MemoryWorker
 
 _MAX_ACTION_PREVIEW = 30
+_LOG_MAX_BLOCKS = 20000
+_LABEL_WIDTH = 132
+
+_TAG_COLORS = {
+    "info": theme.GREEN,
+    "summary": theme.GREEN,
+    "warning": theme.YELLOW,
+    "warn": theme.YELLOW,
+    "note": theme.YELLOW,
+    "error": theme.RED,
+}
+
+
+def _row_label(text: str) -> QLabel:
+    label = QLabel(
+        f"{text} <span style='color:{theme.ACCENT}'>»</span>"
+    )
+    label.setObjectName("rowLabel")
+    label.setTextFormat(Qt.TextFormat.RichText)
+    label.setFixedWidth(_LABEL_WIDTH)
+    label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    return label
+
+
+def _card_row(label_text: str, *widgets: QWidget) -> QFrame:
+    card = QFrame()
+    card.setObjectName("card")
+    row = QHBoxLayout(card)
+    row.setContentsMargins(18, 12, 18, 12)
+    row.setSpacing(12)
+    row.addWidget(_row_label(label_text))
+    for widget in widgets:
+        row.addWidget(widget, 1)
+    return card
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("string-wiper - live memory string scrubber")
-        self.resize(620, 540)
-        self.setMinimumSize(540, 430)
+        self.setWindowTitle("string-wiper")
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setMinimumSize(860, 720)
+        self.resize(1180, 1060)
+        self.setWindowIcon(icons.chip_logo(46))
 
         self._processes: List[ProcessInfo] = []
         self._thread: Optional[QThread] = None
@@ -57,124 +102,337 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ UI
 
     def _build_ui(self) -> None:
-        central = QWidget(self)
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(4)
+        frame = QFrame()
+        frame.setObjectName("windowFrame")
+        self.setCentralWidget(frame)
+        outer = QVBoxLayout(frame)
+        outer.setContentsMargins(1, 1, 1, 1)
+        outer.setSpacing(0)
 
+        self.title_bar = TitleBar()
+        self.title_bar.request_minimize.connect(self.showMinimized)
+        self.title_bar.request_maximize.connect(self._toggle_maximize)
+        self.title_bar.request_close.connect(self.close)
+        outer.addWidget(self.title_bar)
+
+        content = QWidget()
+        root = QVBoxLayout(content)
+        root.setContentsMargins(18, 6, 18, 10)
+        root.setSpacing(10)
+        outer.addWidget(content, 1)
+
+        # banner (hidden unless the process is not elevated)
         self.banner = QLabel()
+        self.banner.setObjectName("bannerCard")
         self.banner.setWordWrap(True)
-        self.banner.setStyleSheet(
-            "background-color:#fff3cd; border:1px solid #d4a017; padding:3px;"
-        )
+        self.banner.setTextFormat(Qt.TextFormat.RichText)
+        self.banner.setContentsMargins(14, 10, 14, 10)
         self.banner.setVisible(False)
         root.addWidget(self.banner)
 
-        top = QFormLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setHorizontalSpacing(6)
-        top.setVerticalSpacing(3)
-
+        # KEYWORDS
         self.keywords_edit = QLineEdit()
         self.keywords_edit.setPlaceholderText(
-            'comma-separated keywords, e.g.  madium, secret project'
+            "Comma-separated keywords, e.g. madium, secret project"
         )
-        top.addRow("Keywords:", self.keywords_edit)
+        root.addWidget(_card_row("KEYWORDS", self.keywords_edit))
 
-        picker_row = QHBoxLayout()
-        picker_row.setSpacing(4)
+        # PROCESS
         self.process_combo = QComboBox()
-        self.process_combo.setMinimumWidth(280)
-        picker_row.addWidget(self.process_combo, 1)
-        self.refresh_btn = QPushButton("Refresh")
-        self.refresh_btn.setFixedWidth(64)
+        self.process_combo.setMinimumWidth(320)
+        self.refresh_btn = QPushButton("REFRESH")
+        self.refresh_btn.setObjectName("refreshBtn")
+        self.refresh_btn.setIcon(icons.refresh())
+        self.refresh_btn.setIconSize(QSize(16, 16))
         self.refresh_btn.clicked.connect(self.refresh_processes)
-        picker_row.addWidget(self.refresh_btn)
-        top.addRow("Process:", picker_row)
-
-        self.arch_label = QLabel("")
-        self.arch_label.setWordWrap(True)
-        self.arch_label.setStyleSheet("color:#444; font-size:11px;")
-        top.addRow("Status:", self.arch_label)
         self.process_combo.currentIndexChanged.connect(self._on_selection_changed)
-        root.addLayout(top)
+        proc_row = QWidget()
+        proc_layout = QHBoxLayout(proc_row)
+        proc_layout.setContentsMargins(0, 0, 0, 0)
+        proc_layout.setSpacing(12)
+        proc_layout.addWidget(self.process_combo, 1)
+        proc_layout.addWidget(self.refresh_btn, 0)
+        root.addWidget(_card_row("PROCESS", proc_row))
 
-        opts = QHBoxLayout()
-        opts.setSpacing(10)
-        self.chk_utf8 = QCheckBox("UTF-8 too")
+        # STATUS
+        self.arch_label = QLabel("")
+        self.arch_label.setTextFormat(Qt.TextFormat.RichText)
+        self.arch_label.setWordWrap(True)
+        root.addWidget(_card_row("STATUS", self.arch_label))
+
+        # OPTIONS
+        self.chk_utf8 = QCheckBox("UTF-8 TOO")
         self.chk_utf8.setChecked(True)
         self.chk_utf8.setToolTip("Also match UTF-8 (multi-byte) encodings.")
-        opts.addWidget(self.chk_utf8)
         self.chk_mapped = QCheckBox("MEM_MAPPED/MEM_IMAGE")
+        self.chk_mapped.setObjectName("dangerCheck")
         self.chk_mapped.setToolTip(
             "DANGER: also scan MEM_MAPPED and MEM_IMAGE regions. Overwriting "
             "mapped files, constants or code can crash the target process."
         )
-        self.chk_mapped.setStyleSheet("color:#a33;")
-        opts.addWidget(self.chk_mapped)
-        self.chk_restart = QCheckBox("Restart after clean")
+        self.chk_mapped.toggled.connect(self._update_footer_mode)
+        self.chk_restart = QCheckBox("RESTART AFTER CLEAN")
         self.chk_restart.setToolTip(
             "Restart the target process after cleaning (taskkill /f /im + relaunch). "
             "A freshly started process can only reload from the already-cleaned "
-            "registry/disk sources, so wiped strings cannot reappear."
+            "sources, so wiped strings cannot reappear."
         )
-        opts.addWidget(self.chk_restart)
-        opts.addStretch(1)
-        root.addLayout(opts)
+        options_row = QWidget()
+        options_layout = QHBoxLayout(options_row)
+        options_layout.setContentsMargins(0, 0, 0, 0)
+        options_layout.setSpacing(36)
+        options_layout.addWidget(self.chk_utf8)
+        options_layout.addWidget(self.chk_mapped)
+        options_layout.addWidget(self.chk_restart)
+        options_layout.addStretch(1)
+        root.addWidget(_card_row("OPTIONS", options_row))
 
+        # action buttons
         buttons = QHBoxLayout()
-        buttons.setSpacing(4)
-        self.clean_btn = QPushButton("Clean memory")
+        buttons.setSpacing(12)
+        self.clean_btn = QPushButton("CLEAN MEMORY")
+        self.clean_btn.setObjectName("cleanBtn")
+        self.clean_btn.setIcon(icons.broom())
+        self.clean_btn.setIconSize(QSize(20, 20))
+        self.clean_btn.setMinimumHeight(52)
         self.clean_btn.setDefault(True)
         self.clean_btn.clicked.connect(self._on_clean_clicked)
-        buttons.addWidget(self.clean_btn)
-        self.persist_btn = QPushButton("Clean persistence...")
+        buttons.addWidget(self.clean_btn, 4)
+        self.persist_btn = QPushButton("CLEAN PERSISTENCE...")
+        self.persist_btn.setIcon(icons.database())
+        self.persist_btn.setIconSize(QSize(20, 20))
+        self.persist_btn.setMinimumHeight(52)
         self.persist_btn.setToolTip(
-            "ShellBags (BagMRU/Bags), TypedPaths, RunMRU, Recent Items and jump "
-            "lists: identify keyword-matching entries, then delete only those "
-            "after you confirm."
+            "ShellBags, TypedPaths, RunMRU, RecentDocs, ComDlg32 MRUs, "
+            "WordWheelQuery, Recent Items and jump lists: identify keyword-matching "
+            "entries and re-injection sources, then delete only what you confirm."
         )
         self.persist_btn.clicked.connect(self._on_persist_clicked)
-        buttons.addWidget(self.persist_btn)
-        self.cancel_btn = QPushButton("Cancel")
+        buttons.addWidget(self.persist_btn, 4)
+        self.cancel_btn = QPushButton("CANCEL")
+        self.cancel_btn.setIcon(icons.x_circle())
+        self.cancel_btn.setIconSize(QSize(20, 20))
+        self.cancel_btn.setMinimumHeight(52)
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._on_cancel_clicked)
-        buttons.addWidget(self.cancel_btn)
+        buttons.addWidget(self.cancel_btn, 3)
         root.addLayout(buttons)
 
+        # PROGRESS row
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFixedHeight(14)
-        root.addWidget(self.progress_bar)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(4)
+        self.progress_pct = QLabel("0%")
+        self.progress_pct.setObjectName("progressPct")
+        self.progress_pct.setFixedWidth(48)
+        self.progress_pct.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        prog_row = QWidget()
+        prog_layout = QHBoxLayout(prog_row)
+        prog_layout.setContentsMargins(0, 4, 0, 4)
+        prog_layout.setSpacing(12)
+        prog_layout.addWidget(self.progress_bar, 1)
+        prog_layout.addWidget(self.progress_pct)
+        root.addWidget(_card_row("PROGRESS", prog_row))
 
-        self.summary_label = QLabel("Verification: (no run yet)")
-        self.summary_label.setStyleSheet("font-weight: bold; font-size:11px;")
-        root.addWidget(self.summary_label)
-
+        # VERIFICATION card (summary + live log)
+        verify = QFrame()
+        verify.setObjectName("card")
+        verify_layout = QVBoxLayout(verify)
+        verify_layout.setContentsMargins(18, 12, 18, 14)
+        verify_layout.setSpacing(10)
+        verify_header = QHBoxLayout()
+        verify_header.setSpacing(8)
+        shield_label = QLabel()
+        shield_label.setPixmap(icons.shield().pixmap(18, 18))
+        shield_label.setFixedSize(18, 18)
+        verify_header.addWidget(shield_label)
+        self.summary_label = QLabel("VERIFICATION (NO RUN YET)")
+        self.summary_label.setObjectName("verifyHeader")
+        self.summary_label.setTextFormat(Qt.TextFormat.RichText)
+        verify_header.addWidget(self.summary_label)
+        verify_header.addStretch(1)
+        self.clear_log_btn = QPushButton("CLEAR LOG")
+        self.clear_log_btn.setObjectName("clearLogBtn")
+        self.clear_log_btn.setIcon(icons.trash())
+        self.clear_log_btn.setIconSize(QSize(14, 14))
+        self.clear_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.clear_log_btn.clicked.connect(self._on_clear_log)
+        verify_header.addWidget(self.clear_log_btn)
+        verify_layout.addLayout(verify_header)
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("logView")
         self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(50000)
+        self.log_view.setMaximumBlockCount(_LOG_MAX_BLOCKS)
         self.log_view.setPlaceholderText("live log...")
-        self.log_view.setStyleSheet(
-            "font-family: Consolas, 'Courier New', monospace; font-size:9px;"
-        )
-        root.addWidget(self.log_view, 1)
+        verify_layout.addWidget(self.log_view, 1)
+        root.addWidget(verify, 1)
+
+        # footer strip
+        rule = QFrame()
+        rule.setObjectName("footerRule")
+        rule.setFixedHeight(1)
+        outer.addWidget(rule)
+        footer = QWidget()
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(18, 8, 18, 10)
+        footer_layout.setSpacing(8)
+
+        mode_wrap = QHBoxLayout()
+        mode_wrap.setSpacing(6)
+        self.footer_mode_icon = QLabel()
+        self.footer_mode_icon.setPixmap(icons.shield(theme.ACCENT_SOFT, 16).pixmap(16, 16))
+        self.footer_mode_icon.setFixedSize(16, 16)
+        self.footer_mode = QLabel("SAFE MODE")
+        self.footer_mode.setObjectName("footerLabel")
+        mode_wrap.addWidget(self.footer_mode_icon)
+        mode_wrap.addWidget(self.footer_mode)
+        footer_layout.addLayout(mode_wrap)
+        footer_layout.addStretch(1)
+
+        arch_wrap = QHBoxLayout()
+        arch_wrap.setSpacing(6)
+        self.footer_arch_icon = QLabel()
+        self.footer_arch_icon.setPixmap(icons.memory_chip(theme.TEXT_DIM, 16).pixmap(16, 16))
+        self.footer_arch_icon.setFixedSize(16, 16)
+        self.footer_arch = QLabel("X64 ARCHITECTURE")
+        self.footer_arch.setObjectName("footerLabel")
+        arch_wrap.addWidget(self.footer_arch_icon)
+        arch_wrap.addWidget(self.footer_arch)
+        footer_layout.addLayout(arch_wrap)
+        footer_layout.addStretch(1)
+
+        access_wrap = QHBoxLayout()
+        access_wrap.setSpacing(6)
+        self.footer_access_icon = QLabel()
+        self.footer_access_icon.setPixmap(icons.memory_chip(theme.GREEN, 16).pixmap(16, 16))
+        self.footer_access_icon.setFixedSize(16, 16)
+        self.footer_access_prefix = QLabel("MEMORY ACCESS:")
+        self.footer_access_prefix.setObjectName("footerLabel")
+        self.footer_access = QLabel("ENABLED")
+        self.footer_access.setObjectName("footerValueOk")
+        access_wrap.addWidget(self.footer_access_icon)
+        access_wrap.addWidget(self.footer_access_prefix)
+        access_wrap.addWidget(self.footer_access)
+        footer_layout.addLayout(access_wrap)
+        outer.addWidget(footer)
+
+    def _toggle_maximize(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+        self.title_bar.sync_maximize_icon(self.isMaximized())
+
+    def _on_clear_log(self) -> None:
+        self.log_view.clear()
+
+    def _update_footer_mode(self, checked: bool) -> None:
+        if checked:
+            self.footer_mode.setText("DANGER MODE")
+            self.footer_mode.setStyleSheet(f"color: {theme.RED}; font-size: 11px; font-weight: 700; letter-spacing: 2px;")
+            self.footer_mode_icon.setPixmap(icons.shield(theme.RED, 16).pixmap(16, 16))
+        else:
+            self.footer_mode.setText("SAFE MODE")
+            self.footer_mode.setStyleSheet("")
+            self.footer_mode_icon.setPixmap(icons.shield(theme.ACCENT_SOFT, 16).pixmap(16, 16))
+
+    # ---------------------------------------------- frameless window handling
+
+    def _toggle_maximize_slot(self) -> None:  # pragma: no cover - alias kept simple
+        self._toggle_maximize()
+
+    def nativeEvent(self, event_type, message):  # noqa: N802 - Qt API
+        """WM_NCHITTEST: edge resize + caption drag outside interactive widgets."""
+        if sys.platform != "win32":
+            return super().nativeEvent(event_type, message)
+        try:
+            import ctypes.wintypes
+
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            x, y = msg.pt.x, msg.pt.y
+        except Exception:
+            return super().nativeEvent(event_type, message)
+        try:
+            local = self.mapFromGlobal(QPoint(x, y))
+        except Exception:
+            return super().nativeEvent(event_type, message)
+
+        if self.isMaximized():
+            in_title = local.y() < self.title_bar.height()
+            if in_title and self._is_interactive(self.childAt(local)):
+                return False, 0
+            return (True, 2) if in_title else (False, 0)  # HTCAPTION=2
+
+        edge = 8
+        left = local.x() < edge
+        right = local.x() > self.width() - edge
+        top = local.y() < edge
+        bottom = local.y() > self.height() - edge
+        ht = 0
+        if left and top:
+            ht = 13  # HTTOPLEFT
+        elif right and top:
+            ht = 14  # HTTOPRIGHT
+        elif left and bottom:
+            ht = 16  # HTBOTTOMLEFT
+        elif right and bottom:
+            ht = 17  # HTBOTTOMRIGHT
+        elif left:
+            ht = 10  # HTLEFT
+        elif right:
+            ht = 11  # HTRIGHT
+        elif top:
+            ht = 12  # HTTOP
+        elif bottom:
+            ht = 15  # HTBOTTOM
+        if ht:
+            return True, ht
+        if local.y() < self.title_bar.height() and not self._is_interactive(self.childAt(local)):
+            return True, 2  # HTCAPTION
+        return False, 0
+
+    @staticmethod
+    def _is_interactive(widget) -> bool:
+        from PySide6.QtWidgets import QAbstractButton, QComboBox, QLineEdit, QPlainTextEdit
+
+        return isinstance(widget, (QAbstractButton, QComboBox, QLineEdit, QPlainTextEdit))
 
     # ------------------------------------------------------- startup checks
 
     def _append_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{stamp}] {message}")
+        text = message.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        tag_text = ""
+        body = text
+        if text.startswith("[") and "]" in text:
+            close = text.index("]")
+            tag_text = text[: close + 1]
+            body = text[close + 1 :]
+            tag_name = tag_text.strip("[]").split()[0].casefold() if tag_text != "[]" else ""
+            tag_color = _TAG_COLORS.get(tag_name, theme.ACCENT_SOFT)
+            tag_html = f"<span style='color:{tag_color}'>{tag_text}</span>"
+        else:
+            tag_html = ""
+        html = (
+            f"<p style='margin:0; text-indent:-62px; margin-left:62px'>"
+            f"<span style='color:{theme.TEXT_MUTED}'>[{stamp}]</span> {tag_html}"
+            f"<span style='color:{theme.TEXT}'>{body}</span></p>"
+        )
+        self.log_view.appendHtml(html)
+        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
 
     def _startup_checks(self) -> None:
         self._append_log(f"[info] {privileges.architecture_summary()}")
+        native = privileges.native_arch()
+        self.footer_arch.setText(f"{native} ARCHITECTURE")
         if not privileges.is_elevated():
             self.banner.setText(
-                "Not running as Administrator. SeDebugPrivilege cannot be enabled and "
-                "OpenProcess/WriteProcessMemory on protected processes will fail with "
-                "access denied. Close this app and relaunch from an elevated terminal."
+                f"<b style='color:{theme.RED_SOFT}'>Not running as Administrator.</b> "
+                "SeDebugPrivilege cannot be enabled and OpenProcess/WriteProcessMemory "
+                "on protected processes will fail with access denied. Close this app "
+                "and relaunch from an elevated terminal."
             )
             self.banner.setVisible(True)
             self._append_log(
@@ -183,6 +441,10 @@ class MainWindow(QMainWindow):
         ok, message = privileges.enable_debug_privilege()
         level = "[info]" if ok else "[warning]"
         self._append_log(f"{level} {message}")
+        access_ok = ok and privileges.is_elevated()
+        self.footer_access.setText("ENABLED" if access_ok else "LIMITED")
+        self.footer_access.setObjectName("footerValueOk" if access_ok else "footerValueBad")
+        self.footer_access.setStyleSheet("")
 
     # -------------------------------------------------------- process picker
 
@@ -200,7 +462,9 @@ class MainWindow(QMainWindow):
             return
         self._processes.sort(key=lambda p: (p.name.casefold(), p.pid))
         for proc in self._processes:
-            self.process_combo.addItem(f"{proc.name}  (PID {proc.pid}, {proc.arch})", proc)
+            self.process_combo.addItem(
+                f"{proc.name} (PID {proc.pid}, {proc.arch})", proc
+            )
         select = 0
         want = previous or "explorer.exe"
         for idx, proc in enumerate(self._processes):
@@ -231,10 +495,15 @@ class MainWindow(QMainWindow):
         pids = pids_for_name(info.name, self._processes)
         ok, note = privileges.arch_compatibility(info.arch)
         text = (
-            f"{info.name}: {len(pids)} PID(s) {pids}; architecture {info.arch}."
+            f"<span style='color:#ffffff; font-weight:600'>{info.name}</span>"
+            f"<span style='color:{theme.TEXT_MUTED}'> | </span>"
+            f"<span style='color:{theme.ACCENT_SOFT}'>PID(s) {pids}</span>"
+            f"<span style='color:{theme.TEXT_MUTED}'> | </span>"
+            f"<span style='color:{theme.ACCENT_SOFT}'>architecture {info.arch}.</span>"
         )
         if note:
-            text += f" {note}"
+            color = theme.RED_SOFT if not ok else theme.YELLOW
+            text += f" <span style='color:{color}'>{note}</span>"
         self.arch_label.setText(text)
         self.clean_btn.setEnabled(not self._running and ok)
         if not ok:
@@ -272,7 +541,9 @@ class MainWindow(QMainWindow):
                     QMessageBox.critical(self, "Architecture mismatch", note or "")
                     return
 
-        option_bits = [f"encodings: ANSI + UTF-16LE{' + UTF-8' if self.chk_utf8.isChecked() else ''}"]
+        option_bits = [
+            f"encodings: ANSI + UTF-16LE{' + UTF-8' if self.chk_utf8.isChecked() else ''}"
+        ]
         if self.chk_mapped.isChecked():
             option_bits.append("regions: MEM_PRIVATE + MEM_MAPPED + MEM_IMAGE (DANGER)")
         else:
@@ -296,10 +567,10 @@ class MainWindow(QMainWindow):
             f"{' | '.join(option_bits)}"
             f"{danger}\n\n"
             "Continue?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             self._append_log("[info] memory wipe cancelled at confirmation dialog.")
             return
 
@@ -330,7 +601,9 @@ class MainWindow(QMainWindow):
             if info is not None:
                 self._last_name = info.name
                 self._last_paths = [
-                    p for p in (get_process_path(pid) for pid in pids_for_name(info.name, self._processes)) if p
+                    p
+                    for p in (get_process_path(pid) for pid in pids_for_name(info.name, self._processes))
+                    if p
                 ]
         self._start_persistence_flow()
 
@@ -357,6 +630,7 @@ class MainWindow(QMainWindow):
         if not running:
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(0)
+            self.progress_pct.setText("0%")
 
     def _launch_worker(self, thread: QThread, worker, done_slot) -> None:
         """Common QThread wiring: run on start, quit on done/fail, teardown-safe.
@@ -413,13 +687,18 @@ class MainWindow(QMainWindow):
     def _on_progress(self, done: int, total: int) -> None:
         if total <= 0:
             self.progress_bar.setRange(0, 0)
+            self.progress_pct.setText("...")
             return
         self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(min(done, total))
+        pct = int(min(done, total) * 100 / total) if total else 0
+        self.progress_pct.setText(f"{pct}%")
 
     @Slot(int, int)
     def _on_pass_update(self, pass_no: int, matches: int) -> None:
-        self.statusBar().showMessage(f"pass {pass_no}: {matches} match(es)")
+        self.summary_label.setText(
+            f"VERIFICATION (SCAN {pass_no}: {matches} MATCHES)"
+        )
 
     @Slot(object)
     def _on_scrub_done(self, summary: object) -> None:
@@ -427,8 +706,8 @@ class MainWindow(QMainWindow):
             self._append_log(f"[error] unexpected result type: {summary!r}")
             return
         self.summary_label.setText(
-            f"Verification: {summary.matches_found} matches found -> "
-            f"{summary.matches_remaining} matches remaining"
+            f"VERIFICATION ({summary.matches_found} FOUND &#8594; "
+            f"{summary.matches_remaining} REMAINING)"
         )
         self._append_log(
             f"[summary] matches found -> matches remaining: "
@@ -487,7 +766,7 @@ class MainWindow(QMainWindow):
             "RecentDocs, ComDlg32 MRUs, WordWheelQuery, Recent Items, jump lists, "
             "shell-visible files and window titles (read-only)..."
         )
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             scan = persistence.scan_persistence(
                 keywords, include_utf8=self.chk_utf8.isChecked()
@@ -536,7 +815,7 @@ class MainWindow(QMainWindow):
                 preview.append(f"REPORT-ONLY {rep.source}: {rep.location} - {rep.detail}")
 
         box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
+        box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Confirm persistence cleanup")
         box.setText(
             f"Found {len(actions)} keyword-matching persistence item(s) and "
@@ -566,8 +845,8 @@ class MainWindow(QMainWindow):
             )
         box.setInformativeText("Delete the standard cleanup entries now?")
         box.setDetailedText("\n".join(preview))
-        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        box.setDefaultButton(QMessageBox.No)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
         deletable_box = None
         if deletable:
             deletable_box = QCheckBox(
@@ -575,7 +854,7 @@ class MainWindow(QMainWindow):
                 "(real files/shortcuts!)"
             )
             box.setCheckBox(deletable_box)
-        if box.exec() != QMessageBox.Yes:
+        if box.exec() != QMessageBox.StandardButton.Yes:
             self._append_log(
                 "[persistence] cleanup declined by user. NOTE: restart is skipped too "
                 "- restarting without cleaning the sources would reload the original "
@@ -635,10 +914,10 @@ class MainWindow(QMainWindow):
             "already-cleaned registry/disk sources, so the wiped strings cannot "
             "reappear. Verify afterwards with Process Hacker (Properties > Memory > "
             "Strings).",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
         )
-        if answer == QMessageBox.Yes:
+        if answer == QMessageBox.StandardButton.Yes:
             self._append_log(f"[restart] restarting {name}...")
             self._start_cleanup_worker([], name, self._last_paths)
         else:

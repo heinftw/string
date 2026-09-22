@@ -77,6 +77,14 @@ those strings after a process restart or reboot.
   UTF-8 / MEM_MAPPED / restart checkboxes, press **Clean memory**, confirm the
   write dialog, then confirm the separate persistence-cleanup dialog.
 
+The window is a dark frameless design matching the supplied mockup: custom
+title bar (drag to move, double-click or the square button to maximize, – ✕),
+card rows with `»` labels (KEYWORDS, PROCESS with refresh, STATUS, OPTIONS),
+large action buttons, a thin progress bar with percentage, a color-tagged
+verification log with **Clear log**, and a footer strip that shows safe/danger
+mode (flips to DANGER MODE when MEM_MAPPED/MEM_IMAGE is on), the CPU
+architecture and whether memory access is ENABLED or LIMITED.
+
 Run the pure-logic unit tests anywhere with `python -m unittest tests.test_matching`.
 
 ## Verification with Process Hacker
@@ -184,6 +192,9 @@ Operate only on systems and processes you own or are authorized to modify.
     │   ├── wiper.py         # protect->zero->restore->verify + scan/wipe/rescan loop
     │   └── persistence.py   # registry/MRU + Recent Items/jump-list cleanup, reinjection reports, restart
     ├── ui/
+    │   ├── theme.py         # dark palette + stylesheet (mockup-matched design)
+    │   ├── icons.py         # drawn QIcon set (broom, database, shield, chip, ...)
+    │   ├── chrome.py        # frameless title bar (move/max/min/close)
     │   ├── main_window.py   # PySide6 main window
     │   └── workers.py       # QThread workers (log/progress/result/cancel contract)
     └── tests/
@@ -200,4 +211,7 @@ definitions exist in exactly one place; (3) tests use stdlib `unittest` (no
 pytest dependency); (4) jump-list files are cleaned at whole-file granularity
 (see Risks) because the compound-file format cannot be edited per entry
 safely; (5) `tests/test_persistence.py` covers the pure `MRUListEx` rebuild
-helper added for indexed-MRU cleanup.
+helper added for indexed-MRU cleanup; (6) `ui/theme.py`, `ui/icons.py` and
+`ui/chrome.py` implement the mockup-matched dark frameless look (custom
+palette/stylesheet, drawn icon set, title-bar chrome with native edge resize
+via `WM_NCHITTEST` on Windows) with zero engine changes.
