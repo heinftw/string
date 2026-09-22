@@ -34,9 +34,9 @@ class ScrubSummary:
     opened: List[int] = field(default_factory=list)
     open_failures: List[str] = field(default_factory=list)
     matches_found: int = 0  # raw hits in the first scan
-    matches_remaining: int = 0  # hits in the final verification scan
-    passes_run: int = 0
-    matches_per_pass: List[int] = field(default_factory=list)
+    matches_remaining: int = 0  # hits in the final scan (post-cap leftovers)
+    passes_run: int = 0  # scans executed
+    matches_per_pass: List[int] = field(default_factory=list)  # per scan
     spans_wiped: int = 0
     wipe_failures: List[str] = field(default_factory=list)
     regenerating_regions: List[str] = field(default_factory=list)
@@ -146,8 +146,11 @@ def _scrub_one_pid(
     summary: ScrubSummary,
 ) -> None:
     found_first_recorded = False
+    wipe_passes = 0
+    scan_no = 0
+    zero_streak = 0
 
-    for pass_no in range(1, MAX_WIPE_PASSES + 1):
+    while True:
         if cancel is not None and cancel.is_set():
             summary.cancelled = True
             return
@@ -156,12 +159,13 @@ def _scrub_one_pid(
             log(f"[error] PID {pid} exited mid-scrub - reporting partial results.")
             return
 
-        log(f"[pass {pass_no}] PID {pid}: scanning...")
+        scan_no += 1
+        log(f"[scan {scan_no}] PID {pid}: scanning...")
         regions = scanner.enum_regions(handle, include_mapped_image, log)
         hits, cancelled = scanner.scan_regions(handle, regions, plan, log, progress, cancel)
         if cancelled:
             summary.cancelled = True
-            log(f"[pass {pass_no}] PID {pid}: cancelled between regions.")
+            log(f"[scan {scan_no}] PID {pid}: cancelled between regions.")
             return
 
         # Record immediately so partial/cancelled runs keep their counts.
@@ -169,12 +173,40 @@ def _scrub_one_pid(
             summary.matches_found += len(hits)
             found_first_recorded = True
         summary.matches_per_pass.append(len(hits))
-        summary.passes_run = pass_no
-        log(f"[pass {pass_no}] PID {pid}: {len(hits)} match(es) found.")
+        summary.passes_run = scan_no
+        log(f"[scan {scan_no}] PID {pid}: {len(hits)} match(es) found.")
         if on_pass is not None:
-            on_pass(pass_no, len(hits))
+            on_pass(scan_no, len(hits))
 
         if not hits:
+            # Zero-hit scan: done only after a confirmation re-scan when wipes
+            # already happened (catches strings mapped/re-created mid-run -
+            # a verification hit is wiped like any other while budget lasts).
+            zero_streak += 1
+            needed = 1 if wipe_passes == 0 else 2
+            if zero_streak >= needed:
+                extra = " (confirmed by re-scan)" if wipe_passes else ""
+                log(f"[verify] PID {pid}: 0 match(es) remaining{extra}.")
+                break
+            log(f"[verify] PID {pid}: 0 match(es) - running confirmation re-scan...")
+            continue
+
+        zero_streak = 0
+        if wipe_passes >= MAX_WIPE_PASSES:
+            summary.matches_remaining += len(hits)
+            regen: List[str] = []
+            for hit in hits:
+                desc = hit.region.describe()
+                if desc not in regen:
+                    regen.append(desc)
+            summary.regenerating_regions.extend(regen)
+            log(
+                f"[verify] PID {pid}: {len(hits)} match(es) remaining after the "
+                f"{MAX_WIPE_PASSES}-wipe-pass cap (re-created or newly mapped by the "
+                "running process). Regions still holding matches:"
+            )
+            for desc in regen:
+                log(f"[verify]   {desc}")
             break
 
         spans: List[tuple] = []
@@ -183,11 +215,14 @@ def _scrub_one_pid(
             if hi > lo:
                 spans.append((lo, hi))
         merged = merge_spans(spans)
-        log(f"[pass {pass_no}] PID {pid}: wiping {len(merged)} string span(s) (from {len(hits)} hit(s))...")
+        log(
+            f"[wipe {wipe_passes + 1}] PID {pid}: wiping {len(merged)} string span(s) "
+            f"(from {len(hits)} hit(s))..."
+        )
         for idx, (lo, hi) in enumerate(merged):
             if cancel is not None and cancel.is_set():
                 summary.cancelled = True
-                log(f"[pass {pass_no}] PID {pid}: cancelled before wipe {idx + 1}/{len(merged)}.")
+                log(f"[wipe {wipe_passes + 1}] PID {pid}: cancelled before wipe {idx + 1}/{len(merged)}.")
                 return
             if not scanner.process_alive(handle):
                 summary.process_died.append(pid)
@@ -198,36 +233,7 @@ def _scrub_one_pid(
                 summary.spans_wiped += 1
             else:
                 summary.wipe_failures.append(f"PID {pid} {_hexspan(lo, hi)}")
-
-    # Verification re-scan (no wiping).
-    if cancel is not None and cancel.is_set():
-        summary.cancelled = True
-        return
-    if not scanner.process_alive(handle):
-        summary.process_died.append(pid)
-        log(f"[verify] PID {pid} exited before verification - partial results only.")
-        return
-    log(f"[verify] PID {pid}: verification re-scan...")
-    regions = scanner.enum_regions(handle, include_mapped_image, log)
-    v_hits, cancelled = scanner.scan_regions(handle, regions, plan, log, progress, cancel)
-    if cancelled:
-        summary.cancelled = True
-        return
-    summary.matches_remaining += len(v_hits)
-    log(f"[verify] PID {pid}: {len(v_hits)} match(es) remaining.")
-    if v_hits:
-        regen: List[str] = []
-        for hit in v_hits:
-            desc = hit.region.describe()
-            if desc not in regen:
-                regen.append(desc)
-        summary.regenerating_regions.extend(regen)
-        log(
-            f"[verify] PID {pid}: matches persist after {MAX_WIPE_PASSES} pass cap "
-            f"(or were re-created by the running process). Regions still regenerating:"
-        )
-        for desc in regen:
-            log(f"[verify]   {desc}")
+        wipe_passes += 1
 
 
 def scrub_processes(

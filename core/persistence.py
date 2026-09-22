@@ -1,25 +1,34 @@
-"""Permanence: persistence-source cleanup (registry + Recent Items / jump lists)
-and optional target-process restart.
+"""Permanence: persistence-source cleanup (registry + Recent Items / jump lists),
+re-injection source identification, and optional target-process restart.
 
 Memory wipes do not survive a process restart or reboot: what "comes back" is
 reloaded from disk/registry.  This module (1) identifies keyword-matching
-persistence entries, (2) after explicit user confirmation, removes ONLY those
-entries while logging every deletion, and (3) can taskkill + relaunch the
-target so a fresh process reloads only the cleaned sources.
+persistence entries AND re-injection sources (files Explorer re-parses, live
+window titles the taskbar re-imports), (2) after explicit user confirmation,
+removes ONLY keyword-matching entries while logging every deletion, and
+(3) can taskkill + relaunch the target so a fresh process reloads only the
+cleaned sources.
 
 Granularity notes (kept honest):
 * ShellBags: a matching BagMRU entry deletes that entry's value plus its node
   subkey; a matching bag under ``Bags`` deletes that numbered bag key.  This
   resets Explorer folder-view settings for the affected paths.
+* Indexed MRU lists (RecentDocs, ComDlg32\\*MRU, WordWheelQuery): matching
+  values are deleted and the key's ``MRUListEx`` slot table is rewritten
+  without the dropped slots.
 * Jump lists (``.automaticDestinations-ms`` / ``.customDestinations-ms``) are
   compound files that cannot be edited entry-by-entry without corrupting them;
   a match deletes the whole file (all of that application's jump-list
   entries), which is flagged per file and in the confirmation dialog.
+* Files on Desktop / Start Menu / Downloads and live window titles are
+  re-injection sources (Explorer re-parses/shown them on every start).  They
+  are REPORTED; deletion is optional, explicit and per item.
 """
 
 from __future__ import annotations
 
 import os
+import struct
 import subprocess
 import sys
 import time
@@ -33,6 +42,7 @@ from .matching import (
     find_matches,
     string_contains_any,
 )
+from .processes import enum_window_titles
 
 if sys.platform == "win32":
     import winreg
@@ -44,6 +54,9 @@ BAGMRU_PATH = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell
 BAGS_PATH = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\Bags"
 TYPED_PATHS_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths"
 RUNMRU_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU"
+RECENTDOCS_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs"
+COMDLG32_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32"
+WORDWHEELQUERY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Explorer\WordWheelQuery"
 
 SHELLBAG_WARNING = (
     "Resets Explorer folder view settings for the affected path and removes its "
@@ -53,6 +66,11 @@ JUMPLIST_WARNING = (
     "Deletes the whole jump-list file: ALL of that application's jump-list entries "
     "go away, including entries that do not match the keywords (the file format "
     "cannot be edited per entry without corrupting it)."
+)
+SHELL_FILE_WARNING = (
+    "Deletes a real file/shortcut. Do this only if the item should not exist on "
+    "disk: as long as it is displayed by Explorer, its name/metadata is re-parsed "
+    "into explorer.exe memory after every restart."
 )
 
 _KIND_REG_VALUE_DEL = "reg-value-del"
@@ -71,7 +89,7 @@ class PendingAction:
     matched_keyword: str
     detail: str
     warning: Optional[str] = None
-    payload: Tuple[str, ...] = ()
+    payload: Tuple[object, ...] = ()  # kind-specific (e.g. (reg_type, value))
 
 
 @dataclass(frozen=True)
@@ -79,6 +97,49 @@ class CleanupResult:
     action: PendingAction
     ok: bool
     message: str
+
+
+@dataclass(frozen=True)
+class ReinjectionReport:
+    """A keyword source that reloads into explorer.exe but is outside the
+    automatic cleanup set (user files, live windows).  ``action`` is set when
+    the item can be deleted after explicit opt-in."""
+
+    source: str
+    location: str
+    detail: str
+    matched_keyword: str
+    deletable: bool
+    action: Optional[PendingAction]
+
+
+@dataclass(frozen=True)
+class ScanReport:
+    """Two-phase scan result: confirmed-candidate actions + re-injection reports."""
+
+    actions: Tuple[PendingAction, ...]
+    reports: Tuple[ReinjectionReport, ...]
+
+
+# ---------------------------------------------------------------------------
+# Pure helpers (unit-tested anywhere)
+# ---------------------------------------------------------------------------
+
+
+def rebuild_mru_list_ex(data: bytes, dropped: Sequence[int]) -> bytes:
+    """Rewrite an MRUListEx slot table (DWORD slots + 0xFFFFFFFF terminator)
+    without the dropped slot numbers.  Odd-sized input is returned unchanged."""
+    if len(data) % 4 or not data:
+        return data
+    drop = set(dropped)
+    slots = struct.unpack(f"<{len(data) // 4}I", data)
+    kept = [s for s in slots if s != 0xFFFFFFFF and s not in drop]
+    return struct.pack(f"<{len(kept) + 1}I", *kept, 0xFFFFFFFF)
+
+
+# ---------------------------------------------------------------------------
+# Registry scanning
+# ---------------------------------------------------------------------------
 
 
 def _require_windows() -> None:
@@ -246,6 +307,76 @@ def _scan_bags(
             )
 
 
+def _scan_indexed_mru_tree(
+    full_path: str,
+    actions: List[PendingAction],
+    patterns: Sequence[Pattern],
+    keywords: Sequence[str],
+) -> None:
+    """Recursively clean indexed MRU lists (RecentDocs, ComDlg32, WordWheelQuery).
+
+    Matching values are deleted (slot name = decimal index) and the key's
+    MRUListEx table is rewritten without the dropped slots.
+    """
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, full_path, 0, winreg.KEY_READ)
+    except OSError:
+        return
+    dropped_slots: List[int] = []
+    try:
+        i = 0
+        while True:
+            try:
+                name, data, _vtype = winreg.EnumValue(key, i)
+            except OSError:
+                break
+            i += 1
+            if name == "MRUListEx":
+                continue
+            kw = _value_match(data, patterns, keywords)
+            if kw:
+                actions.append(
+                    PendingAction(
+                        _KIND_REG_VALUE_DEL,
+                        full_path,
+                        name,
+                        kw,
+                        f"MRU entry {full_path}\\{name} matched {kw!r}",
+                    )
+                )
+                if name.isdigit():
+                    dropped_slots.append(int(name))
+        if dropped_slots:
+            try:
+                mru, _t = winreg.QueryValueEx(key, "MRUListEx")
+            except OSError:
+                mru = None
+            if isinstance(mru, bytes) and mru:
+                new_mru = rebuild_mru_list_ex(mru, dropped_slots)
+                if new_mru != mru:
+                    actions.append(
+                        PendingAction(
+                            _KIND_REG_VALUE_SET,
+                            full_path,
+                            "MRUListEx",
+                            str(dropped_slots[0]),
+                            f"rewrite MRUListEx in '{full_path}' without slot(s) "
+                            f"{sorted(dropped_slots)}",
+                            payload=(winreg.REG_BINARY, new_mru),
+                        )
+                    )
+        i = 0
+        while True:
+            try:
+                sub = winreg.EnumKey(key, i)
+            except OSError:
+                break
+            i += 1
+            _scan_indexed_mru_tree(full_path + "\\" + sub, actions, patterns, keywords)
+    finally:
+        winreg.CloseKey(key)
+
+
 def _scan_typed_paths(
     actions: List[PendingAction],
     patterns: Sequence[Pattern],
@@ -326,14 +457,69 @@ def _scan_runmru(
                     "MRUList",
                     deleted_letters[0],
                     f"rewrite RunMRU MRUList {mru_list!r} -> {new_list!r} (dropped {', '.join(deleted_letters)})",
-                    payload=(new_list,),
+                    payload=(winreg.REG_SZ, new_list),
                 )
             )
+
+
+# ---------------------------------------------------------------------------
+# File + window scanning (re-injection sources)
+# ---------------------------------------------------------------------------
 
 
 def _recent_root() -> str:
     appdata = os.environ.get("APPDATA") or ""
     return os.path.join(appdata, "Microsoft", "Windows", "Recent")
+
+
+def _shell_locations() -> List[Tuple[str, str, bool]]:
+    """(label, directory, recursive) places whose items Explorer displays."""
+    profile = os.environ.get("USERPROFILE") or ""
+    public = os.environ.get("PUBLIC") or ""
+    appdata = os.environ.get("APPDATA") or ""
+    programdata = os.environ.get("PROGRAMDATA") or ""
+    out: List[Tuple[str, str, bool]] = []
+    if profile:
+        out.append(("Desktop", os.path.join(profile, "Desktop"), False))
+        out.append(("Downloads", os.path.join(profile, "Downloads"), False))
+        out.append(
+            (
+                "Start Menu",
+                os.path.join(appdata, "Microsoft", "Windows", "Start Menu", "Programs"),
+                True,
+            )
+        )
+    if public:
+        out.append(("Public Desktop", os.path.join(public, "Desktop"), False))
+    if programdata:
+        out.append(
+            (
+                "Common Start Menu",
+                os.path.join(programdata, "Microsoft", "Windows", "Start Menu", "Programs"),
+                True,
+            )
+        )
+    return out
+
+
+def _file_matches(
+    full: str,
+    entry: str,
+    patterns: Sequence[Pattern],
+    keywords: Sequence[str],
+) -> Optional[str]:
+    kw = string_contains_any(os.path.splitext(entry)[0], keywords)
+    if kw:
+        return kw
+    try:
+        if os.path.getsize(full) > 32 * 1024 * 1024:
+            return None
+        with open(full, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    matches = find_matches(data, patterns)
+    return matches[0].keyword if matches else None
 
 
 def _scan_file_actions(
@@ -382,19 +568,123 @@ def _scan_file_actions(
         )
 
 
-def scan_persistence(keywords: Sequence[str], include_utf8: bool = True) -> List[PendingAction]:
-    """Read-only identification of every keyword-matching persistence entry.
+def _scan_shell_files(
+    reports: List[ReinjectionReport],
+    patterns: Sequence[Pattern],
+    keywords: Sequence[str],
+) -> None:
+    """Identify Desktop/Start Menu/Downloads items that re-inject the keywords.
 
-    Nothing is modified; the returned list is what the user confirms before
-    ``execute_cleanup`` runs.
+    Shortcuts and other files alike are reported with a deletable action; the
+    UI only executes them after explicit per-run opt-in (the confirm dialog's
+    checkbox) because these are real user files outside the standard cleanup
+    set.
+    """
+    for label, directory, recursive in _shell_locations():
+        if recursive:
+            stack = [directory]
+            files: List[Tuple[str, str]] = []
+            while stack:
+                current = stack.pop()
+                try:
+                    entries = os.listdir(current)
+                except OSError:
+                    continue
+                for entry in entries:
+                    full = os.path.join(current, entry)
+                    if os.path.isdir(full):
+                        stack.append(full)
+                    elif os.path.isfile(full):
+                        files.append((full, entry))
+        else:
+            try:
+                files = [
+                    (os.path.join(directory, e), e)
+                    for e in os.listdir(directory)
+                    if os.path.isfile(os.path.join(directory, e))
+                ]
+            except OSError:
+                continue
+        for full, entry in files:
+            matched_kw = _file_matches(full, entry, patterns, keywords)
+            if matched_kw is None:
+                continue
+            directory_name = os.path.dirname(full)
+            action = PendingAction(
+                _KIND_FILE_DEL,
+                directory_name,
+                entry,
+                matched_kw,
+                f"{label} item '{entry}' matched {matched_kw!r}",
+                SHELL_FILE_WARNING,
+            )
+            reports.append(
+                ReinjectionReport(
+                    f"file on {label}",
+                    full,
+                    f"'{entry}' (name/content matched {matched_kw!r}) is re-parsed by "
+                    "Explorer whenever this location is displayed - delete or rename "
+                    "it to stop re-injection",
+                    matched_kw,
+                    True,
+                    action,
+                )
+            )
+
+
+def _scan_window_titles(reports: List[ReinjectionReport], keywords: Sequence[str]) -> None:
+    """Report live windows whose titles contain the keywords.
+
+    Every explorer.exe taskbar re-imports window titles of running programs on
+    startup, so titles come back unless the owning application is closed.
+    """
+    try:
+        windows = enum_window_titles()
+    except OSError:
+        return
+    for window in windows:
+        kw = string_contains_any(window.title, keywords)
+        if kw:
+            reports.append(
+                ReinjectionReport(
+                    "live window title",
+                    f"PID {window.pid} HWND 0x{window.hwnd:X}",
+                    f"window title {window.title!r} matched {kw!r} - the taskbar of "
+                    "every explorer.exe instance re-imports it; close the owning "
+                    "application to stop re-injection",
+                    kw,
+                    False,
+                    None,
+                )
+            )
+
+
+# ---------------------------------------------------------------------------
+# Public two-phase API
+# ---------------------------------------------------------------------------
+
+
+def scan_persistence(keywords: Sequence[str], include_utf8: bool = True) -> ScanReport:
+    """Read-only identification phase.  Nothing is modified.
+
+    ``actions`` are keyword-matching entries from the standard cleanup set
+    (ShellBags, TypedPaths, RunMRU, RecentDocs, ComDlg32 MRUs, WordWheelQuery,
+    Recent Items .lnk, jump lists) - one confirmation away from deletion.
+    ``reports`` are re-injection sources outside that set (shell-visible files,
+    live window titles) with optional per-item delete actions.
     """
     _require_windows()
     pattern_set: PatternSet = build_patterns(keywords, include_utf8=include_utf8)
     actions: List[PendingAction] = []
+    reports: List[ReinjectionReport] = []
+
     _scan_bagmru_key(BAGMRU_PATH, actions, pattern_set.patterns, keywords)
     _scan_bags(actions, pattern_set.patterns, keywords)
     _scan_typed_paths(actions, pattern_set.patterns, keywords)
     _scan_runmru(actions, pattern_set.patterns, keywords)
+    _scan_indexed_mru_tree(RECENTDOCS_PATH, actions, pattern_set.patterns, keywords)
+    _scan_indexed_mru_tree(COMDLG32_PATH, actions, pattern_set.patterns, keywords)
+    _scan_indexed_mru_tree(WORDWHEELQUERY_PATH, actions, pattern_set.patterns, keywords)
 
     recent = _recent_root()
     _scan_file_actions(
@@ -429,7 +719,16 @@ def scan_persistence(keywords: Sequence[str], include_utf8: bool = True) -> List
         JUMPLIST_WARNING,
         match_name=False,
     )
-    return actions
+
+    _scan_shell_files(reports, pattern_set.patterns, keywords)
+    _scan_window_titles(reports, keywords)
+
+    return ScanReport(tuple(actions), tuple(reports))
+
+
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
 
 
 def _delete_tree(parent_path: str, name: str) -> None:
@@ -496,15 +795,18 @@ def execute_action(action: PendingAction) -> CleanupResult:
                 winreg.KEY_READ | winreg.KEY_SET_VALUE,
             )
             try:
-                winreg.SetValueEx(key, action.name, 0, winreg.REG_SZ, action.payload[0])
+                reg_type, value = action.payload
+                winreg.SetValueEx(key, action.name, 0, int(reg_type), value)
             finally:
                 winreg.CloseKey(key)
             return CleanupResult(action, True, f"updated registry value {label}")
         if action.kind == _KIND_FILE_DEL:
             os.remove(os.path.join(action.path, action.name))
-            return CleanupResult(action, True, f"deleted file '{os.path.join(action.path, action.name)}'")
+            return CleanupResult(
+                action, True, f"deleted file '{os.path.join(action.path, action.name)}'"
+            )
         return CleanupResult(action, False, f"unknown action kind {action.kind!r} - skipped")
-    except OSError as exc:
+    except (OSError, ValueError, TypeError) as exc:
         return CleanupResult(action, False, f"{label} failed: {exc}")
 
 

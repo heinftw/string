@@ -53,10 +53,15 @@ WORD = c_uint16
 LONG = c_int32
 ULONG_PTR = c_size_t
 SIZE_T = c_size_t
+LPARAM = c_size_t
 HANDLE = c_void_p
 LPVOID = c_void_p
 LPCVOID = c_void_p
 LPDWORD = POINTER(DWORD)
+
+# EnumWindows callback (stdcall on x86; identical to CFUNCTYPE on x64 - the
+# supported target per README).  WINFUNCTYPE is Windows-only, hence the guard.
+WNDENUMPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(BOOL, HANDLE, LPARAM)
 
 MAX_PATH = 260
 
@@ -323,6 +328,36 @@ QueryFullProcessImageNameW = _bind(
     "QueryFullProcessImageNameW",
     BOOL,
     [HANDLE, DWORD, ctypes.c_wchar_p, LPDWORD],
+)
+EnumWindows = _bind(
+    _kernel32,
+    "EnumWindows",
+    BOOL,
+    [WNDENUMPROC, LPARAM],
+)
+IsWindowVisible = _bind(
+    _kernel32,
+    "IsWindowVisible",
+    BOOL,
+    [HANDLE],
+)
+GetWindowTextLengthW = _bind(
+    _kernel32,
+    "GetWindowTextLengthW",
+    c_int,
+    [HANDLE],
+)
+GetWindowTextW = _bind(
+    _kernel32,
+    "GetWindowTextW",
+    c_int,
+    [HANDLE, LPVOID, c_int],
+)
+GetWindowThreadProcessId = _bind(
+    _kernel32,
+    "GetWindowThreadProcessId",
+    DWORD,
+    [HANDLE, LPDWORD],
 )
 
 OpenProcessToken = _bind(

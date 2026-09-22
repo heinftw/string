@@ -16,6 +16,39 @@ class ProcessInfo:
     arch: str  # "x86" | "x64" | "ia64" | "arm64" | "unknown"
 
 
+@dataclass(frozen=True)
+class WindowInfo:
+    hwnd: int
+    pid: int
+    title: str
+
+
+def enum_window_titles() -> List[WindowInfo]:
+    """Titles of all visible top-level windows (Explorer's taskbar re-imports
+    these into every new explorer.exe instance - a key re-injection source)."""
+    out: List[WindowInfo] = []
+
+    @winapi.WNDENUMPROC
+    def _callback(hwnd, _lparam):
+        try:
+            if winapi.IsWindowVisible(hwnd):
+                length = winapi.GetWindowTextLengthW(hwnd)
+                if 0 < length < 4096:
+                    buf = ctypes.create_unicode_buffer(length + 1)
+                    if winapi.GetWindowTextW(hwnd, buf, length + 1):
+                        pid = winapi.DWORD(0)
+                        winapi.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        out.append(
+                            WindowInfo(int(hwnd or 0), pid.value, buf.value)
+                        )
+        except OSError:
+            pass  # a window can vanish mid-enumeration; keep going
+        return True
+
+    winapi.EnumWindows(_callback, 0)
+    return out
+
+
 def get_process_arch(pid: int) -> str:
     """Architecture of a running process ('x86'/'x64'/..., or 'unknown')."""
     handle = winapi.OpenProcess(winapi.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)

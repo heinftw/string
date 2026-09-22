@@ -484,11 +484,12 @@ class MainWindow(QMainWindow):
             return
         self._append_log(
             "[persistence] scanning ShellBags (BagMRU/Bags), TypedPaths, RunMRU, "
-            "Recent Items and jump lists for keyword matches (read-only)..."
+            "RecentDocs, ComDlg32 MRUs, WordWheelQuery, Recent Items, jump lists, "
+            "shell-visible files and window titles (read-only)..."
         )
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            actions = persistence.scan_persistence(
+            scan = persistence.scan_persistence(
                 keywords, include_utf8=self.chk_utf8.isChecked()
             )
         except OSError as exc:
@@ -501,10 +502,16 @@ class MainWindow(QMainWindow):
             return
         QApplication.restoreOverrideCursor()
 
-        if not actions:
+        actions = list(scan.actions)
+        reports = list(scan.reports)
+        deletable = [rep for rep in reports if rep.deletable and rep.action is not None]
+        for rep in reports:
+            self._append_log(f"[reinject] {rep.source} at {rep.location}: {rep.detail}")
+
+        if not actions and not deletable and not reports:
             self._append_log(
-                "[persistence] scan: no keyword-matching entries found in ShellBags, "
-                "TypedPaths, RunMRU, Recent Items or jump lists."
+                "[persistence] scan: no keyword-matching entries and no re-injection "
+                "sources found."
             )
             self._maybe_offer_restart(sources_cleaned=True)
             return
@@ -513,40 +520,61 @@ class MainWindow(QMainWindow):
         for action in actions[:_MAX_ACTION_PREVIEW]:
             suffix = f"  [!] {action.warning}" if action.warning else ""
             preview.append(
-                f"{action.kind}: {action.path}\\{action.name}  (matched "
+                f"DELETE {action.kind}: {action.path}\\{action.name}  (matched "
                 f"{action.matched_keyword!r}) - {action.detail}{suffix}"
             )
         if len(actions) > _MAX_ACTION_PREVIEW:
-            preview.append(f"... and {len(actions) - _MAX_ACTION_PREVIEW} more (see details)")
+            preview.append(
+                f"... and {len(actions) - _MAX_ACTION_PREVIEW} more (see details)"
+            )
+        for rep in deletable:
+            preview.append(
+                f"OPTIONAL {rep.source}: {rep.location}  (matched {rep.matched_keyword!r}) - {rep.detail}"
+            )
+        for rep in reports:
+            if not (rep.deletable and rep.action is not None):
+                preview.append(f"REPORT-ONLY {rep.source}: {rep.location} - {rep.detail}")
 
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
         box.setWindowTitle("Confirm persistence cleanup")
         box.setText(
-            f"Found {len(actions)} keyword-matching persistence item(s). Deleting them "
-            "is required so the strings cannot come back after explorer.exe restarts "
-            "or the PC reboots (RAM is cleared on reboot; what returns is reloaded "
-            "from these registry/disk sources).\n\n"
-            "ONLY keyword-matching entries are removed, with these granularities:\n"
-            "- ShellBags: matching BagMRU entry (+ its node) or matching bag under "
-            "Bags - resets folder view settings for the affected paths.\n"
-            "- TypedPaths / RunMRU: matching values only (RunMRU MRUList is rewritten).\n"
+            f"Found {len(actions)} keyword-matching persistence item(s) and "
+            f"{len(reports)} re-injection source(s). Cleaning is required so the "
+            "strings cannot come back after explorer.exe restarts or the PC reboots "
+            "(RAM is cleared on reboot; what returns is reloaded from these "
+            "registry/disk/window sources).\n\n"
+            "Standard cleanup removes ONLY keyword-matching entries:\n"
+            "- ShellBags (BagMRU/Bags): matching entry/node/bag - resets folder view "
+            "settings for the affected paths.\n"
+            "- MRU lists (TypedPaths, RunMRU + MRUList, RecentDocs, ComDlg32, "
+            "WordWheelQuery + MRUListEx): matching values only.\n"
             "- Recent Items .lnk: matching shortcuts only.\n"
-            "- Jump lists: the whole .automaticDestinations-ms/.customDestinations-ms "
-            "file is deleted (the format cannot be edited per entry safely), which "
-            "removes that application's OTHER jump-list entries too.\n"
+            "- Jump lists: the whole file is deleted (format cannot be edited per "
+            "entry safely), removing that application's OTHER entries too.\n"
+            "\nRe-injection sources (listed below) keep the strings alive: files "
+            "Explorer re-parses (name/metadata) and window titles the taskbar "
+            "re-imports on every start. Tick the box to delete the on-disk items "
+            "too; window titles require closing the owning application.\n"
         )
         if self.chk_restart.isChecked():
             box.setText(
                 box.text()
-                + f"\nAfter cleanup, {self._last_name or 'the target'} will be killed "
-                "(taskkill /f /im) and relaunched so a fresh process reloads only the "
-                "cleaned sources."
+                + f"\nAfter cleanup, {self._last_name or 'the target'} would be killed "
+                "(taskkill /f /im) and relaunched - skipped automatically while any "
+                "re-injection source remains."
             )
-        box.setInformativeText("Delete these entries now?")
+        box.setInformativeText("Delete the standard cleanup entries now?")
         box.setDetailedText("\n".join(preview))
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
         box.setDefaultButton(QMessageBox.No)
+        deletable_box = None
+        if deletable:
+            deletable_box = QCheckBox(
+                f"Also DELETE the {len(deletable)} reported on-disk item(s) "
+                "(real files/shortcuts!)"
+            )
+            box.setCheckBox(deletable_box)
         if box.exec() != QMessageBox.Yes:
             self._append_log(
                 "[persistence] cleanup declined by user. NOTE: restart is skipped too "
@@ -555,11 +583,37 @@ class MainWindow(QMainWindow):
             )
             return
 
-        restart_name = self._last_name if self.chk_restart.isChecked() else None
-        for action in actions:
+        checked = deletable_box is not None and deletable_box.isChecked()
+        extra = [rep.action for rep in deletable] if checked else []
+        remaining_reports = [
+            rep for rep in reports if not (checked and rep.deletable and rep.action is not None)
+        ]
+        final_actions = actions + extra
+        if not final_actions:
+            self._append_log("[persistence] nothing selected for deletion.")
+            if remaining_reports:
+                self._append_log(
+                    "[restart] skipped: re-injection source(s) remain (see [reinject] "
+                    "lines) - a restart would reload the original strings."
+                )
+            else:
+                self._maybe_offer_restart(sources_cleaned=True)
+            return
+
+        restart_name = None
+        if self.chk_restart.isChecked():
+            if remaining_reports:
+                self._append_log(
+                    f"[restart] skipped: {len(remaining_reports)} re-injection "
+                    "source(s) remain (see [reinject] lines) - close/delete them, then "
+                    "re-run so the restarted process cannot reload the strings."
+                )
+            else:
+                restart_name = self._last_name
+        for action in final_actions:
             self._append_log(f"[persistence] confirmed: {action.detail}")
-        self._append_log(f"[persistence] executing {len(actions)} action(s)...")
-        self._start_cleanup_worker(actions, restart_name, self._last_paths)
+        self._append_log(f"[persistence] executing {len(final_actions)} action(s)...")
+        self._start_cleanup_worker(final_actions, restart_name, self._last_paths)
 
     def _maybe_offer_restart(self, sources_cleaned: bool) -> None:
         if not self.chk_restart.isChecked():

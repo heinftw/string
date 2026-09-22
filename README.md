@@ -43,13 +43,17 @@ those strings after a process restart or reboot.
    regenerating strings if matches persist past the cap.
 8. **Persistence cleanup** — after a separate confirmation, only
    keyword-matching entries are removed (every deletion logged): ShellBags
-   `BagMRU`/`Bags`, `TypedPaths`, `RunMRU` (MRUList rewritten), Recent Items
-   `.lnk` shortcuts and automatic/custom jump lists.
+   `BagMRU`/`Bags`, `TypedPaths`, `RunMRU`, `RecentDocs`, `ComDlg32` MRUs and
+   `WordWheelQuery` (`MRUList`/`MRUListEx` slot tables rewritten), Recent Items
+   `.lnk` shortcuts and automatic/custom jump lists. Re-injection sources are
+   identified and reported with per-item opt-in deletion: files on Desktop /
+   Start Menu / Downloads that Explorer re-parses (names, FileDescription /
+   OriginalFilename metadata) and live window titles the taskbar re-imports.
 9. **Restart option** — `taskkill /f /im <name>` plus relaunch (optional,
    confirmed separately). A freshly started process can only rebuild its
-   strings from the already-cleaned registry/disk sources, so the wiped strings
-   cannot reappear — this is why RAM-only wiping is not "permanent" and source
-   cleanup is required.
+   strings from the already-cleaned registry/disk/window sources, so the wiped
+   strings cannot reappear — which is why the restart is skipped with a
+   precise warning while any identified re-injection source remains.
 10. **Verification** — the internal verification pass and Process Hacker's
     Strings scan (ASCII + Unicode, minimum length 4) look at the same data, so
     both reports agree: zero internal matches means zero Process Hacker
@@ -109,6 +113,16 @@ restarting `explorer.exe` or rebooting to confirm permanence.
   string keep their own copies. *Remediation:* find them with Process Hacker
   (system-wide Strings / handle search) and close those applications or scrub
   each one with this tool; only a reboot clears everything currently in RAM.
+- **Live window titles.** The taskbar of every explorer.exe instance imports
+  the titles of running windows at startup. If a keyword appears in another
+  application's window title, a restarted explorer reloads it from that live
+  window. *Remediation:* close the owning application (each title is reported
+  in the `[reinject]` log lines with its PID).
+- **Files Explorer displays.** Desktop / Start Menu / Downloads items whose
+  name or embedded metadata (FileDescription, OriginalFilename, version
+  resources) contains the keyword are re-parsed into explorer.exe whenever
+  that location is shown. *Remediation:* tick the delete option in the cleanup
+  dialog (or delete/rename the files yourself).
 - **Memory-mapped files on disk.** If the string lives in a file mapping,
   the bytes may be backed by a file on disk; writing to shared mapped views can
   also dirty that file, which is why `MEM_MAPPED`/`MEM_IMAGE` scanning is off by
@@ -168,19 +182,22 @@ Operate only on systems and processes you own or are authorized to modify.
     │   ├── matching.py      # PURE keyword->pattern + boundary logic (unit-tested anywhere)
     │   ├── scanner.py       # region enum, chunked reads, cross-chunk hits, remote spans
     │   ├── wiper.py         # protect->zero->restore->verify + scan/wipe/rescan loop
-    │   └── persistence.py   # registry + Recent Items/jump-list cleanup + restart
+    │   └── persistence.py   # registry/MRU + Recent Items/jump-list cleanup, reinjection reports, restart
     ├── ui/
     │   ├── main_window.py   # PySide6 main window
     │   └── workers.py       # QThread workers (log/progress/result/cancel contract)
     └── tests/
-        └── test_matching.py # cross-platform tests for matching + boundary logic
+        ├── test_matching.py  # cross-platform tests for matching + boundary logic
+        └── test_persistence.py # cross-platform tests for pure persistence helpers
 
 Deviations from the reference architecture: (1) `__init__.py` package markers
 were added so package-relative imports resolve deterministically;
 (2) `winapi.py` additionally owns the `WinError`-to-message mapper and the
-few bindings needed by the required elevation/architecture/relaunch features
-(`GetTokenInformation`, `GetNativeSystemInfo`, `GetExitCodeProcess`,
-`QueryFullProcessImageNameW`) so struct/flag/function definitions exist in
-exactly one place; (3) tests use stdlib `unittest` (no pytest dependency);
-(4) jump-list files are cleaned at whole-file granularity (see Risks) because
-the compound-file format cannot be edited per entry safely.
+few bindings needed by the required elevation/architecture/relaunch/window
+features (`GetTokenInformation`, `GetNativeSystemInfo`, `GetExitCodeProcess`,
+`QueryFullProcessImageNameW`, `EnumWindows` family) so struct/flag/function
+definitions exist in exactly one place; (3) tests use stdlib `unittest` (no
+pytest dependency); (4) jump-list files are cleaned at whole-file granularity
+(see Risks) because the compound-file format cannot be edited per entry
+safely; (5) `tests/test_persistence.py` covers the pure `MRUListEx` rebuild
+helper added for indexed-MRU cleanup.
