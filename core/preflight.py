@@ -20,6 +20,7 @@ is thin I/O over ``winreg`` and :mod:`core.winapi`.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 from typing import Optional, Tuple
 
@@ -136,6 +137,134 @@ def read_true_build() -> Optional[int]:
                 return None
     except OSError:
         return None
+
+
+# ---- Qt platform-plugin preflight (runs after `import PySide6`, before
+# ---- QApplication): "Could not load the Qt platform plugin \"windows\" ...
+# ---- even though it was found" means qwindows.dll exists but its own
+# ---- dependencies failed to load - usually the VC++ 2015-2022 runtime.
+
+_QT_CRT_DEPS = (
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "msvcp140_atomic_wait.dll",
+    "msvcp140_codecvt_ids.dll",
+)
+
+_VCREDIST_FIX = (
+    "FIX - install the missing C/C++ runtime:\n"
+    "1. Download \"Microsoft Visual C++ Redistributable 2015-2022\" (x64)\n"
+    "   from microsoft.com (search: latest supported Visual C++ downloads).\n"
+    "2. Install it, then run the app again."
+)
+
+
+def describe_plugin_failure(
+    error_code: int,
+    missing: Tuple[str, ...],
+    plugin_name: str,
+) -> str:
+    """Pure: map a plugin load failure to an actionable explanation."""
+    lines = [
+        f"The Qt platform plugin '{plugin_name}' exists but could not be loaded.",
+        "",
+    ]
+    if missing:
+        lines += [
+            "These runtime files are missing on this PC:",
+            "    " + ", ".join(missing),
+            "",
+            _VCREDIST_FIX,
+        ]
+    elif error_code == winapi.ERROR_MOD_NOT_FOUND:
+        lines += [
+            "Windows error 126 (module not found): the plugin or one of its "
+            "dependencies is missing. This is usually the C/C++ runtime.",
+            "",
+            _VCREDIST_FIX,
+        ]
+    elif error_code == winapi.ERROR_BAD_EXE_FORMAT:
+        lines += [
+            "Windows error 193 (not a valid Win32 application): 32/64-bit "
+            "mismatch. Install 64-bit Python 3.10+ and PySide6 into it.",
+        ]
+    elif error_code == winapi.ERROR_ACCESS_DENIED:
+        lines += [
+            "Windows error 5 (access denied): antivirus or Controlled Folder "
+            "Access is blocking the plugin. Allow python.exe, or move this "
+            "folder out of Downloads into Documents and try again.",
+        ]
+    else:
+        try:
+            detail = str(ctypes.WinError(error_code))  # type: ignore[attr-defined]
+        except (AttributeError, ValueError, OSError):
+            detail = f"error {error_code}"
+        lines += [f"Windows reported: {detail}", "", _VCREDIST_FIX]
+    lines += [
+        "",
+        "Also worth trying:",
+        "    python -m pip install --force-reinstall PySide6",
+    ]
+    return "\n".join(lines)
+
+
+def probe_missing_dlls(names: Tuple[str, ...]) -> Tuple[str, ...]:
+    """Return which of ``names`` cannot be LoadLibrary'd right now."""
+    missing = []
+    for name in names:
+        handle = winapi.LoadLibraryExW(name, None, 0)
+        if handle:
+            winapi.FreeLibrary(handle)
+        else:
+            winapi.set_last_error(0)  # keep probing; the name is what matters
+            missing.append(name)
+    return tuple(missing)
+
+
+def find_qt_platform_plugin() -> Optional[str]:
+    """Locate ``platforms/qwindows.dll`` inside the installed PySide6 tree."""
+    try:
+        import PySide6
+    except ImportError:
+        return None
+    root = os.path.dirname(PySide6.__file__)
+    for rel in (
+        ("plugins", "platforms", "qwindows.dll"),
+        ("Qt", "plugins", "platforms", "qwindows.dll"),
+        ("Qt6", "plugins", "platforms", "qwindows.dll"),
+    ):
+        candidate = os.path.join(root, *rel)
+        if os.path.isfile(candidate):
+            return candidate
+    for dirpath, _dirnames, filenames in os.walk(root):
+        if "qwindows.dll" in filenames and dirpath.endswith("platforms"):
+            return os.path.join(dirpath, "qwindows.dll")
+    return None
+
+
+def check_qt_platform() -> bool:
+    """Probe qwindows.dll before QApplication(); True = continue launching."""
+    if not winapi.IS_WINDOWS:
+        return True
+    plugin = find_qt_platform_plugin()
+    if plugin is None:
+        return True  # let Qt report its own error
+    handle = winapi.LoadLibraryExW(plugin, None, winapi.LOAD_WITH_ALTERED_SEARCH_PATH)
+    if handle:
+        winapi.FreeLibrary(handle)
+        return True
+    code = winapi.get_last_error()
+    missing = probe_missing_dlls(_QT_CRT_DEPS)
+    message = describe_plugin_failure(code, missing, os.path.basename(plugin))
+    print(f"[preflight] {message}", file=sys.stderr)
+    text = message + "\n\nClick Yes to try launching anyway, No to exit."
+    flags = winapi.MB_YESNO | winapi.MB_ICONERROR | winapi.MB_DEFBUTTON2
+    try:
+        choice = winapi.MessageBoxW(None, text, "string-wiper - startup check", flags)
+    except OSError:
+        return False
+    return choice == winapi.IDYES
 
 
 def run_preflight() -> bool:

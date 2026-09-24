@@ -89,6 +89,20 @@ Run the pure-logic unit tests anywhere with `python -m unittest discover -s test
 
 ### Troubleshooting
 
+- **"qt.qpa.plugin: Could not load the Qt platform plugin 'windows' ... even
+  though it was found"** then "This application failed to start because no Qt
+  platform plugin could be initialized" - the plugin file exists but one of
+  its runtime dependencies failed to load.  Fixes in order:
+  1. Install the **Microsoft Visual C++ Redistributable 2015-2022 (x64)** from
+     microsoft.com (*latest supported Visual C++ downloads*) - this is the
+     usual cause.
+  2. `python -m pip install --force-reinstall PySide6`
+  3. If antivirus or **Controlled Folder Access** is on, allow `python.exe` or
+     move the project folder out of `Downloads` into Documents.
+  4. If it still fails, update the graphics driver (the plugin loads but cannot
+     initialize on broken GPU stacks) and confirm `py -0p` lists 64-bit Python
+     3.10+.  The startup check names the exact missing DLL when this happens.
+
 - **Dialog "Fatal Error: Windows 7 is the minimum supported platform" on a
   Windows 10/11 PC** - the app is NOT detecting old Windows.  A
   compatibility-mode shim is telling Python's native libraries that the PC is

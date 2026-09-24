@@ -25,6 +25,12 @@ def main() -> int:
 
     from PySide6.QtWidgets import QApplication
 
+    if _sys.platform == "win32":
+        # Probe the Qt platform plugin before QApplication() aborts with the
+        # bare "Could not load the Qt platform plugin 'windows'" message.
+        if not preflight.check_qt_platform():
+            return 1
+
     from ui import theme
     from ui.main_window import MainWindow
 

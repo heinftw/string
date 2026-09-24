@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from core.preflight import classify_versions
+from core.preflight import classify_versions, describe_plugin_failure
 
 
 class ClassifyVersionsTests(unittest.TestCase):
@@ -66,6 +66,36 @@ class ClassifyVersionsTests(unittest.TestCase):
         self.assertIsNotNone(result)
         _, allow_continue = result
         self.assertFalse(allow_continue)
+
+
+class DescribePluginFailureTests(unittest.TestCase):
+    def test_missing_runtime_files(self):
+        message = describe_plugin_failure(
+            126, ("msvcp140.dll", "vcruntime140_1.dll"), "qwindows.dll"
+        )
+        self.assertIn("qwindows.dll", message)
+        self.assertIn("msvcp140.dll", message)
+        self.assertIn("vcruntime140_1.dll", message)
+        self.assertIn("Visual C++ Redistributable", message)
+
+    def test_error_126_without_specific_names(self):
+        message = describe_plugin_failure(126, (), "qwindows.dll")
+        self.assertIn("126", message)
+        self.assertIn("Visual C++ Redistributable", message)
+
+    def test_error_193_architecture(self):
+        message = describe_plugin_failure(193, (), "qwindows.dll")
+        self.assertIn("193", message)
+        self.assertIn("64-bit", message)
+
+    def test_error_5_access_denied(self):
+        message = describe_plugin_failure(5, (), "qwindows.dll")
+        self.assertIn("antivirus", message.casefold())
+
+    def test_unknown_error_includes_vc_fix(self):
+        message = describe_plugin_failure(1114, (), "qwindows.dll")
+        self.assertIn("Visual C++ Redistributable", message)
+        self.assertIn("force-reinstall PySide6", message)
 
 
 if __name__ == "__main__":

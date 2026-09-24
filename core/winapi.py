@@ -137,6 +137,11 @@ ERROR_ACCESS_DENIED = 5
 ERROR_INVALID_PARAMETER = 87
 ERROR_PARTIAL_COPY = 299
 ERROR_NOT_ALL_ASSIGNED = 1300
+ERROR_MOD_NOT_FOUND = 126
+ERROR_BAD_EXE_FORMAT = 193
+
+# LoadLibraryExW flag: resolve the loaded DLL's own dependencies next to it
+LOAD_WITH_ALTERED_SEARCH_PATH = 0x00000008
 
 # ---------------------------------------------------------------------------
 # Processor architecture constants (GetNativeSystemInfo)
@@ -404,6 +409,18 @@ MessageBoxW = _bind(
     "MessageBoxW",
     c_int,
     [HANDLE, ctypes.c_wchar_p, ctypes.c_wchar_p, UINT],
+)
+LoadLibraryExW = _bind(
+    _kernel32,
+    "LoadLibraryExW",
+    HANDLE,
+    [ctypes.c_wchar_p, HANDLE, DWORD],
+)
+FreeLibrary = _bind(
+    _kernel32,
+    "FreeLibrary",
+    BOOL,
+    [HANDLE],
 )
 
 OpenProcessToken = _bind(
