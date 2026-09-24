@@ -12,6 +12,17 @@ import sys
 
 
 def main() -> int:
+    import sys as _sys
+
+    if _sys.platform == "win32":
+        # Before any Qt DLL loads: detect "compatibility mode" version lies
+        # that make native libraries abort with "Windows 7 is the minimum
+        # supported platform" and explain the fix instead (core/preflight).
+        from core import preflight
+
+        if not preflight.run_preflight():
+            return 1
+
     from PySide6.QtWidgets import QApplication
 
     from ui import theme

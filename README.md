@@ -85,7 +85,21 @@ verification log with **Clear log**, and a footer strip that shows safe/danger
 mode (flips to DANGER MODE when MEM_MAPPED/MEM_IMAGE is on), the CPU
 architecture and whether memory access is ENABLED or LIMITED.
 
-Run the pure-logic unit tests anywhere with `python -m unittest tests.test_matching`.
+Run the pure-logic unit tests anywhere with `python -m unittest discover -s tests -t .`.
+
+### Troubleshooting
+
+- **Dialog "Fatal Error: Windows 7 is the minimum supported platform" on a
+  Windows 10/11 PC** - the app is NOT detecting old Windows.  A
+  compatibility-mode shim is telling Python's native libraries that the PC is
+  older than Windows 7, and one of them aborts.  Fix: open a terminal, run
+  `where python`, right-click `python.exe` -> **Properties** -> **Compatibility**
+  tab, uncheck *"Run this program in compatibility mode for:"* (do the same for
+  `pythonw.exe` in the same folder), then start the app from a terminal with
+  `python main.py`.  The app detects this situation at startup and shows these
+  steps itself before loading the UI.
+- Launch from a terminal instead of double-clicking `main.py` so any error text
+  lands in the console you can read or copy.
 
 ## Verification with Process Hacker
 
@@ -190,6 +204,7 @@ Operate only on systems and processes you own or are authorized to modify.
     │   ├── matching.py      # PURE keyword->pattern + boundary logic (unit-tested anywhere)
     │   ├── scanner.py       # region enum, chunked reads, cross-chunk hits, remote spans
     │   ├── wiper.py         # protect->zero->restore->verify + scan/wipe/rescan loop
+    │   ├── preflight.py     # startup check: compatibility-mode version-lie detection
     │   └── persistence.py   # registry/MRU + Recent Items/jump-list cleanup, reinjection reports, restart
     ├── ui/
     │   ├── theme.py         # dark palette + stylesheet (mockup-matched design)
@@ -214,4 +229,8 @@ safely; (5) `tests/test_persistence.py` covers the pure `MRUListEx` rebuild
 helper added for indexed-MRU cleanup; (6) `ui/theme.py`, `ui/icons.py` and
 `ui/chrome.py` implement the mockup-matched dark frameless look (custom
 palette/stylesheet, drawn icon set, title-bar chrome with native edge resize
-via `WM_NCHITTEST` on Windows) with zero engine changes.
+via `WM_NCHITTEST` on Windows) with zero engine changes; (7)
+`core/preflight.py` adds a pure-logic startup check that detects
+compatibility-mode version lies (registry build vs `GetVersionExW`) and shows
+the fix instead of the native "Windows 7 is the minimum supported platform"
+fatal dialog.

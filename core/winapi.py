@@ -59,6 +59,7 @@ HANDLE = c_void_p
 LPVOID = c_void_p
 LPCVOID = c_void_p
 LPDWORD = POINTER(DWORD)
+UINT = ctypes.c_uint
 
 # EnumWindows callback (stdcall on x86; identical to CFUNCTYPE on x64 - the
 # supported target per README).  WINFUNCTYPE is Windows-only, hence the guard.
@@ -77,6 +78,18 @@ PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 STILL_ACTIVE = 259
+
+# ---------------------------------------------------------------------------
+# MessageBox (user32) flags - used by the startup preflight
+# ---------------------------------------------------------------------------
+
+MB_OK = 0x0000
+MB_YESNO = 0x0004
+MB_ICONERROR = 0x0010
+MB_ICONWARNING = 0x0030
+MB_DEFBUTTON2 = 0x0100
+IDYES = 6
+IDNO = 7
 
 # ---------------------------------------------------------------------------
 # Toolhelp
@@ -214,6 +227,24 @@ class TOKEN_PRIVILEGES(Structure):
 class TOKEN_ELEVATION(Structure):
     _fields_ = [
         ("TokenIsElevated", DWORD),
+    ]
+
+
+class OSVERSIONINFOW(Structure):
+    """GetVersionExW input/output (276 bytes on Windows).
+
+    The startup preflight compares what this reports (shim-influenceable)
+    against the registry build number (shim-proof) to detect compatibility
+    mode version lies.
+    """
+
+    _fields_ = [
+        ("dwOSVersionInfoSize", DWORD),
+        ("dwMajorVersion", DWORD),
+        ("dwMinorVersion", DWORD),
+        ("dwBuildNumber", DWORD),
+        ("dwPlatformId", DWORD),
+        ("szCSDVersion", c_wchar * 128),
     ]
 
 
@@ -362,6 +393,18 @@ GetWindowThreadProcessId = _bind(
     DWORD,
     [HANDLE, LPDWORD],
 )
+GetVersionExW = _bind(
+    _kernel32,
+    "GetVersionExW",
+    BOOL,
+    [POINTER(OSVERSIONINFOW)],
+)
+MessageBoxW = _bind(
+    _user32,
+    "MessageBoxW",
+    c_int,
+    [HANDLE, ctypes.c_wchar_p, ctypes.c_wchar_p, UINT],
+)
 
 OpenProcessToken = _bind(
     _advapi32,
@@ -437,4 +480,9 @@ if IS_WINDOWS:  # layout sanity checks, run once at import
         raise RuntimeError(
             f"MEMORY_BASIC_INFORMATION layout is {_mbi} bytes, expected {_expected_mbi} "
             f"for a {_ptr * 8}-bit interpreter"
+        )
+    _ovi = ctypes.sizeof(OSVERSIONINFOW)
+    if _ovi != 276:
+        raise RuntimeError(
+            f"OSVERSIONINFOW layout is {_ovi} bytes, expected 276 on Windows"
         )
